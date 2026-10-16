@@ -1,0 +1,9 @@
+k1_driver:
+  ros__parameters:
+    port: /dev/ttyACM0
+    baudrate: 1000000
+    publish_rate_hz: 50.0       # joint_states publish rate
+    command_duration_ms: 0      # move time the firmware interpolates over for each arm command, 0 = as fast as possible
+    state_timeout_sec: 1.0      # stop publishing joint_states if the arm has been silent this long, 0 disables the check
+    enable_on_start: false      # lock the motors when the node starts
+    disable_on_shutdown: false  # release the motors when the node stops (WARNING: the arm collapses)
