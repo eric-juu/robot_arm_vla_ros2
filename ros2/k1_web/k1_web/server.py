@@ -85,8 +85,11 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             await asyncio.sleep(1.0)    # slow down guessing
             return JSONResponse({"ok": False, "message": "wrong token"}, status_code=401)
         response = JSONResponse({"ok": True})
+        # behind a tunnel the scheme is https (uvicorn applies X-Forwarded-Proto from 127.0.0.1),
+        # so the cookie is https-only there while plain http://127.0.0.1 still works on the PC
+        secure = config.secure_cookie or request.url.scheme == "https"
         response.set_cookie(COOKIE_NAME, session_value, httponly=True, samesite="strict",
-                            secure=config.secure_cookie, max_age=30 * 24 * 3600)
+                            secure=secure, max_age=30 * 24 * 3600)
         return response
 
     @app.post("/logout")

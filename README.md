@@ -6,7 +6,7 @@ Software for the Unitree K1 (Sagittarius) arm: a Python SDK, a ROS 2 driver, and
 |---|---|---|
 | Python SDK | `src/unitree_k1_sdk/` | Talks to the arm over serial. Use it directly from scripts (`examples/`). |
 | ROS 2 driver | `ros2/k1_driver_py/` | Exposes the arm as ROS topics and services. See [its README](ros2/k1_driver_py/README.md) and [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md). |
-| Web control | `ros2/k1_web/` | Browser UI with joint sliders, saved poses and a live camera feed, reachable from anywhere through Tailscale. See [its README](ros2/k1_web/README.md). |
+| Web control | `ros2/k1_web/` | Browser UI with joint sliders, saved poses and a live camera feed, reachable from anywhere through a Cloudflare tunnel. See [its README](ros2/k1_web/README.md). |
 
 All of it runs on the Linux PC the arm and camera are plugged into: Ubuntu 24.04 + ROS 2 Jazzy. Ubuntu 22.04 + Humble also works; replace `jazzy` with `humble` below and leave out `--break-system-packages`. You only need a browser on the device you control it from.
 
@@ -45,6 +45,14 @@ Check:
 
 ```bash
 python3 -c "import fastapi, uvicorn, websockets, yaml; print('ok')"
+```
+
+For remote access, also install `cloudflared` (Cloudflare's tunnel client, not in apt). It needs no account:
+
+```bash
+curl -L -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+sudo dpkg -i /tmp/cloudflared.deb       # on an ARM PC use cloudflared-linux-arm64.deb
+cloudflared --version
 ```
 
 ### 3. Install the SDK
@@ -119,11 +127,11 @@ source ~/.k1_web/token.sh
 # try it without hardware first: fake arm, no camera
 ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false
 
-# the real arm and camera
-ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
+# the real arm and camera, reachable from anywhere
+ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0 tunnel:=true
 ```
 
-This starts the arm driver (or the fake arm), the camera, and the web server. Leave the terminal open; Ctrl+C stops everything. Other variations:
+This starts the arm driver (or the fake arm), the camera, the web server, and, with `tunnel:=true`, the public link. Leave the terminal open; Ctrl+C stops everything. Other variations:
 
 ```bash
 ros2 launch k1_web k1_bringup.launch.py use_camera:=false              # arm only
@@ -135,12 +143,22 @@ If you don't know the arm's port, check `ls /dev/ttyACM* /dev/serial/by-path/`. 
 ### 3. Open the page
 
 - **On the Linux PC itself:** `http://127.0.0.1:8080`
-- **From anywhere else:** set up [Tailscale](https://tailscale.com) once:
-  1. Install it on the PC and on your laptop/phone, and sign in to the same account on both.
-  2. On the PC, run `sudo tailscale up`, then `sudo tailscale serve --bg 8080`.
-  3. Open `https://<pc-name>.<tailnet>.ts.net`. The exact URL is printed by `tailscale serve status`.
+- **From anywhere else** (phone, laptop, any network): launch with `tunnel:=true` and look for this box in the launch output:
+  ```
+  ====================================================
+    https://some-random-words.trycloudflare.com
+  ====================================================
+  ```
+  Open that link in any browser. Nothing needs to be installed on that device. The link can take up to ~30 s to start working.
 
 Sign in with the token.
+
+About the link:
+- **It changes every time you restart the launch.** Get the new one from the output each time.
+- **It's public:** anyone who has it reaches the login page, so the token is what protects the arm. Don't share the token or post the link.
+- **It's a Cloudflare "quick tunnel":** free, no account, meant for testing, and with no uptime guarantee. For a permanent link, set up a named Cloudflare tunnel with your own domain (see the [k1_web README](ros2/k1_web/README.md#remote-access)).
+
+To run the tunnel without the launch file (for example while the launch is already running): `ros2 run k1_web tunnel`.
 
 ### 4. Drive the arm
 
@@ -193,4 +211,7 @@ cd ros2/k1_web && python -m pytest test
 | Sliders stay greyed out | Click **Enable motors** first, then wait for "enabled" in the header |
 | "camera unavailable" | Run `ros2 topic hz /image_raw/compressed`, check `video_device:=`, and check that you're in the `video` group |
 | `Permission denied: /dev/ttyACM0` | You're not in the `dialout` group yet (log out and back in after `usermod`) |
+| `cloudflared is not installed` | Install it (end of setup step 2) |
+| Tunnel link shows a Cloudflare error page | Wait ~30 s after the link appears and reload. Check that the web server is running (`curl -I http://127.0.0.1:8080`). |
+| No link ever appears, or `[tunnel] … ERR` lines | The network may block Cloudflare's default protocol. Run `cloudflared tunnel --protocol http2 --url http://127.0.0.1:8080` by hand to try the fallback. |
 | Port 8080 already in use | Another copy is still running. Stop it, or change `port` in `k1_web.yaml`. |

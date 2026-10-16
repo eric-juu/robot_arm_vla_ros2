@@ -26,6 +26,7 @@ setup(
         "console_scripts": [
             "web_node = k1_web.web_node:main",
             "mock_arm = k1_web.mock_arm_node:main",
+            "tunnel = k1_web.tunnel:main",
         ],
     },
 )

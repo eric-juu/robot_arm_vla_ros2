@@ -54,6 +54,14 @@ def test_auth_gates_everything_but_login(setup):
     assert client.get("/snapshot.jpg").content == b"\xff\xd8jpeg"
 
 
+def test_cookie_is_https_only_over_https(setup):
+    client, _, _, _ = setup
+    assert "secure" not in client.post("/login", json={"token": TOKEN}).headers["set-cookie"].lower()
+    https = TestClient(client.app, base_url="https://testserver")
+    response = https.post("/login", json={"token": f"  {TOKEN}\n"})     # pasted with whitespace
+    assert response.status_code == 200 and "secure" in response.headers["set-cookie"].lower()
+
+
 def test_bearer_token(setup):
     client, _, _, _ = setup
     with client.websocket_connect("/ws", headers={"Authorization": f"Bearer {TOKEN}"}) as ws:

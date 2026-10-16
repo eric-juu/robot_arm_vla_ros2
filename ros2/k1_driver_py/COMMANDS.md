@@ -110,11 +110,11 @@ To watch a replay without moving the arm, play only the state topic: `ros2 bag p
 
 ## Web interface and camera
 
-To drive the arm from a browser (sliders, saved poses, live wrist camera, remote access over Tailscale), use the `k1_web` package. It starts this driver for you:
+To drive the arm from a browser (sliders, saved poses, live wrist camera, remote access through a Cloudflare tunnel), use the `k1_web` package. It starts this driver for you:
 
 ```bash
-export K1_WEB_TOKEN=$(openssl rand -hex 16)
-ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
+source ~/.k1_web/token.sh      # created once, see the top-level README
+ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0 tunnel:=true
 ```
 
 See `ros2/k1_web/README.md`.

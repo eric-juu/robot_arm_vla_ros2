@@ -3,6 +3,7 @@ Starts everything for remote control: the arm driver (or a mock), the wrist came
 
     ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
     ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false    # no hardware
+    ros2 launch k1_web k1_bringup.launch.py tunnel:=true                    # also print a public https link
 
 The web node needs K1_WEB_TOKEN in the environment.
 """
@@ -26,6 +27,9 @@ def generate_launch_description():
         DeclareLaunchArgument("mock", default_value="false", description="use a fake arm instead of k1_driver"),
         DeclareLaunchArgument("use_camera", default_value="true", description="start the v4l2 camera node"),
         DeclareLaunchArgument("video_device", default_value="/dev/video0", description="camera device"),
+        DeclareLaunchArgument("tunnel", default_value="false",
+                              description="expose the page through a Cloudflare quick tunnel (needs cloudflared)"),
+        DeclareLaunchArgument("web_port", default_value="8080", description="port the web server listens on"),
         DeclareLaunchArgument("web_params_file", default_value=os.path.join(share, "config", "k1_web.yaml")),
         DeclareLaunchArgument("camera_params_file", default_value=os.path.join(share, "config", "camera.yaml")),
 
@@ -46,6 +50,12 @@ def generate_launch_description():
         ),
         Node(
             package="k1_web", executable="web_node", name="k1_web", output="screen",
-            parameters=[LaunchConfiguration("web_params_file")],
+            parameters=[LaunchConfiguration("web_params_file"),
+                        {"port": LaunchConfiguration("web_port")}],
+        ),
+        Node(
+            package="k1_web", executable="tunnel", name="tunnel", output="screen",
+            arguments=[["http://127.0.0.1:", LaunchConfiguration("web_port")]],
+            condition=IfCondition(LaunchConfiguration("tunnel")),
         ),
     ])

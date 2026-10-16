@@ -1,13 +1,16 @@
 # k1_web
 
-A web page for controlling the K1 arm remotely, with the wrist camera's live feed. It runs on the Linux PC next to `k1_driver`, and you open it from anywhere through Tailscale.
+A web page for controlling the K1 arm remotely, with the wrist camera's live feed. It runs on the Linux PC next to `k1_driver`, and you open it from anywhere through a Cloudflare tunnel.
 
 ```
-Browser ──https──> Tailscale ──> Linux PC
-                                 ├─ k1_driver   (k1_driver_py, unchanged)
-                                 ├─ camera      (v4l2_camera) → /image_raw, /image_raw/compressed
-                                 └─ k1_web      web server + ROS node
+Browser ──https──> Cloudflare ──tunnel──> Linux PC
+                                          ├─ tunnel      (cloudflared, started with tunnel:=true)
+                                          ├─ k1_driver   (k1_driver_py, unchanged)
+                                          ├─ camera      (v4l2_camera) → /image_raw, /image_raw/compressed
+                                          └─ k1_web      web server + ROS node, on 127.0.0.1:8080
 ```
+
+`cloudflared` makes an outgoing connection to Cloudflare, so the PC needs no open ports or router changes.
 
 The browser only ever sends *goals*. The `k1_web` node enforces safety on the server side:
 
@@ -36,13 +39,24 @@ echo $K1_WEB_TOKEN              # the login token: only these 32 hex characters
 # no hardware: fake arm, no camera
 ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false
 
-# real arm + camera + web
-ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
+# real arm + camera + web + public link
+ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0 tunnel:=true
 ```
 
-Then open `http://127.0.0.1:8080` on the PC, or the Tailscale URL (below) from anywhere, and sign in with the token. The server keeps the token it was started with, so restart the launch if you change it.
+Then open `http://127.0.0.1:8080` on the PC, or the `https://….trycloudflare.com` link printed in the launch output from anywhere, and sign in with the token. The server keeps the token it was started with, so restart the launch if you change it.
 
-Launch arguments: `port`, `mock`, `use_camera`, `video_device`, `web_params_file`, `camera_params_file` (`--show-args` lists them).
+Launch arguments (`--show-args` lists them):
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `port` | `/dev/ttyACM0` | arm serial port |
+| `mock` | `false` | use the fake arm instead of `k1_driver` |
+| `use_camera` | `true` | start the camera node |
+| `video_device` | `/dev/video0` | camera device |
+| `tunnel` | `false` | start a Cloudflare quick tunnel and print its public link |
+| `web_port` | `8080` | port of the web server (and the tunnel's target) |
+| `web_params_file` | `config/k1_web.yaml` | |
+| `camera_params_file` | `config/camera.yaml` | |
 
 ### Using the page
 
@@ -66,13 +80,28 @@ ros2 bag record /image_raw/compressed /joint_states /joint_position_command /gri
 
 To check the camera: `v4l2-ctl --list-devices`, then `ros2 topic hz /image_raw/compressed`. Device, resolution and JPEG quality are set in `config/camera.yaml`.
 
-## Remote access with Tailscale
+## Remote access
 
-1. Install Tailscale on the Linux PC and on your laptop/phone, and sign in to the same account on both (`curl -fsSL https://tailscale.com/install.sh | sh`, then `sudo tailscale up`).
-2. On the PC, run `sudo tailscale serve --bg 8080`.
-3. Open `https://<pc-name>.<tailnet>.ts.net` from any of your devices.
+### Cloudflare quick tunnel (current setup)
 
-Only devices on your tailnet can reach the page, and Tailscale provides the HTTPS. Once you only use it over https, set `secure_cookie: true`. To let people in who don't have Tailscale, `tailscale funnel` makes the page public. The token is then the only thing protecting the arm, so use a long one.
+Install `cloudflared` once (top-level README, setup step 2), then add `tunnel:=true` to the launch command. You can also run the tunnel on its own with `ros2 run k1_web tunnel [http://127.0.0.1:8080]`. Either way it runs `cloudflared tunnel --url http://127.0.0.1:8080` and prints the public `https://<random-words>.trycloudflare.com` link in a box.
+
+- **No account or client app** is needed; the link works in any browser.
+- **The link changes on every restart.**
+- **The link is public**, so the token is the only protection. Keep it long (the 32 hex characters from `openssl rand -hex 16`) and private. Wrong logins are slowed to one try per second.
+- **The session cookie is set HTTPS-only automatically** when you sign in through the tunnel. Uvicorn takes `X-Forwarded-Proto` from the local `cloudflared`, so plain `http://127.0.0.1:8080` still works on the PC. `secure_cookie: true` forces HTTPS-only everywhere.
+- **Quick tunnels are meant for testing:** they come with no uptime guarantee.
+
+### Later: a permanent link
+
+A **named Cloudflare tunnel** gives a fixed URL such as `https://arm.example.com`. It needs:
+- a free Cloudflare account;
+- a domain on Cloudflare (~$10/yr);
+- `cloudflared tunnel login`, `cloudflared tunnel create k1`, and a DNS route.
+
+You can also put **Cloudflare Access** (email login) in front of it, so strangers never even reach the token page. That's the right setup once other people need access.
+
+**Tailscale** (`tailscale serve --bg 8080`) is the private alternative: nothing is public, but every device needs the Tailscale app.
 
 ### Start on boot (systemd user service)
 
@@ -85,7 +114,7 @@ After=network-online.target
 
 [Service]
 EnvironmentFile=%h/.k1_web/env
-ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash && source %h/ros2_ws/install/setup.bash && exec ros2 launch k1_web k1_bringup.launch.py'
+ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash && source %h/ros2_ws/install/setup.bash && exec ros2 launch k1_web k1_bringup.launch.py tunnel:=true'
 Restart=on-failure
 
 [Install]
@@ -96,6 +125,7 @@ WantedBy=default.target
 systemctl --user daemon-reload && systemctl --user enable --now k1.service
 sudo loginctl enable-linger $USER     # start at boot without logging in
 journalctl --user -u k1.service -f
+journalctl --user -u k1.service | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | tail -1   # current public link
 ```
 
 The motors stay disabled at startup unless `enable_on_start` is set for the driver.
