@@ -8,31 +8,90 @@ Software for the Unitree K1 (Sagittarius) arm: a Python SDK, a ROS 2 driver, and
 | ROS 2 driver | `ros2/k1_driver_py/` | Exposes the arm as ROS topics and services. See [its README](ros2/k1_driver_py/README.md) and [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md). |
 | Web control | `ros2/k1_web/` | Browser UI with joint sliders, saved poses and a live camera feed, reachable from anywhere through Tailscale. See [its README](ros2/k1_web/README.md). |
 
-All of it runs on the Linux PC the arm and camera are plugged into (Ubuntu 22.04 + ROS 2 Humble, or 24.04 + Jazzy). You only need a browser on the device you control it from.
+All of it runs on the Linux PC the arm and camera are plugged into: Ubuntu 24.04 + ROS 2 Jazzy. Ubuntu 22.04 + Humble also works; replace `jazzy` with `humble` below and leave out `--break-system-packages`. You only need a browser on the device you control it from.
 
 ## Setup (once, on the Linux PC)
 
+The code can live in any folder. These instructions keep the repo in `~/Downloads/robot_arm_vla_ros2`, and build it in `~/ros2_ws`, where colcon puts its `build/`, `install/` and `log/` folders. If your clone is somewhere else, change the paths to match.
+
+### 1. Get the code
+
 ```bash
-# 1. get the code into a ROS 2 workspace
-mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
+cd ~/Downloads
 git clone https://github.com/eric-juu/robot_arm_vla_ros2.git
-
-# 2. dependencies
-sudo apt install python3-serial python3-numpy python3-tqdm \
-                 python3-fastapi python3-uvicorn python3-websockets python3-yaml \
-                 ros-$ROS_DISTRO-v4l2-camera ros-$ROS_DISTRO-image-transport-plugins
-pip install --no-deps -e ~/ros2_ws/src/robot_arm_vla_ros2   # add --break-system-packages on Ubuntu 24.04
-
-# 3. serial port and camera access (log out and back in afterwards)
-sudo usermod -aG dialout,video $USER
-
-# 4. build
-source /opt/ros/$ROS_DISTRO/setup.bash
-cd ~/ros2_ws
-colcon build --base-paths src/robot_arm_vla_ros2/ros2
 ```
 
-To update later, pull and rebuild: `cd ~/ros2_ws/src/robot_arm_vla_ros2 && git pull && cd ~/ros2_ws && colcon build --base-paths src/robot_arm_vla_ros2/ros2`.
+Already have it? Check that it's a git clone and update it: `cd ~/Downloads/robot_arm_vla_ros2 && git remote -v && git pull`. A folder downloaded as a zip (named `robot_arm_vla_ros2-main`) can't `git pull`, so use a real clone.
+
+### 2. Install the system packages
+
+The `python3-*` web packages are in Ubuntu's **universe** repository, so enable it first:
+
+```bash
+sudo add-apt-repository universe
+sudo apt update
+sudo apt install python3-serial python3-numpy python3-tqdm \
+                 python3-fastapi python3-uvicorn python3-websockets python3-yaml \
+                 ros-jazzy-v4l2-camera ros-jazzy-image-transport-plugins v4l-utils
+```
+
+If apt still says `Unable to locate package` for any of the `python3-*` packages, leave those out of the apt command and install them with pip instead. ROS uses the system `python3`, so it sees them:
+
+```bash
+pip install --user --break-system-packages fastapi uvicorn websockets pyyaml
+```
+
+Check:
+
+```bash
+python3 -c "import fastapi, uvicorn, websockets, yaml; print('ok')"
+```
+
+### 3. Install the SDK
+
+```bash
+pip install --no-deps -e ~/Downloads/robot_arm_vla_ros2 --break-system-packages
+python3 -c "import unitree_k1_sdk, os; print(os.path.dirname(unitree_k1_sdk.__file__))"   # should point into the repo
+```
+
+### 4. Allow access to the serial port and camera
+
+```bash
+sudo usermod -aG dialout,video $USER
+```
+
+Then log out and back in.
+
+### 5. Build
+
+```bash
+source /opt/ros/jazzy/setup.bash
+mkdir -p ~/ros2_ws && cd ~/ros2_ws
+colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2
+```
+
+It should end with `Summary: 2 packages finished` (`k1_driver_py` and `k1_web`).
+
+### 6. Load ROS and the workspace in every terminal
+
+ROS only finds these packages in a terminal that has sourced the workspace. Without it you get `Package 'k1_web' not found, searching: ['/opt/ros/jazzy']`. Add the two lines to `~/.bashrc` so every new terminal does it:
+
+```bash
+echo 'source /opt/ros/jazzy/setup.bash' >> ~/.bashrc
+echo 'source ~/ros2_ws/install/setup.bash' >> ~/.bashrc
+source ~/.bashrc
+ros2 pkg list | grep k1      # expect k1_driver_py and k1_web
+```
+
+### Updating later
+
+```bash
+cd ~/Downloads/robot_arm_vla_ros2 && git pull
+cd ~/ros2_ws && colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2
+source ~/ros2_ws/install/setup.bash     # or open a new terminal
+```
+
+Restart `ros2 launch` afterwards so the new code is used.
 
 ## Controlling the arm from a browser
 
@@ -42,23 +101,31 @@ To update later, pull and rebuild: `cd ~/ros2_ws/src/robot_arm_vla_ros2 && git p
 mkdir -p ~/.k1_web
 echo "export K1_WEB_TOKEN=$(openssl rand -hex 16)" > ~/.k1_web/token.sh
 chmod 600 ~/.k1_web/token.sh
-cat ~/.k1_web/token.sh      # this is what you type on the login page
 ```
+
+Print the token:
+
+```bash
+source ~/.k1_web/token.sh && echo $K1_WEB_TOKEN
+```
+
+That prints only the 32 hex characters, which is what you type on the login page. Don't type the `export K1_WEB_TOKEN=` part. The token stays the same until you rewrite `token.sh`. If you do rewrite it, restart `ros2 launch`, because the server keeps the token it was started with.
 
 ### 2. Start everything
 
 ```bash
-source /opt/ros/$ROS_DISTRO/setup.bash
-source ~/ros2_ws/install/setup.bash
 source ~/.k1_web/token.sh
 
+# try it without hardware first: fake arm, no camera
+ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false
+
+# the real arm and camera
 ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
 ```
 
-This starts the arm driver, the camera, and the web server. Useful variations:
+This starts the arm driver (or the fake arm), the camera, and the web server. Leave the terminal open; Ctrl+C stops everything. Other variations:
 
 ```bash
-ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false   # no hardware: fake arm, no camera
 ros2 launch k1_web k1_bringup.launch.py use_camera:=false              # arm only
 ros2 launch k1_web k1_bringup.launch.py video_device:=/dev/video2      # a different camera
 ```
@@ -117,6 +184,10 @@ cd ros2/k1_web && python -m pytest test
 
 | Symptom | Check |
 |---|---|
+| `Package 'k1_web' not found, searching: ['/opt/ros/jazzy']` | The workspace isn't sourced in this terminal. Run `source ~/ros2_ws/install/setup.bash`, or do setup step 6. If `ros2 pkg list \| grep k1` still lacks `k1_web`, `git pull` and rebuild. |
+| `cannot access …/ros2` or colcon finds 0 packages | `--base-paths` must point at the `ros2/` folder inside your clone. Check with `ls ~/Downloads/robot_arm_vla_ros2/ros2`. |
+| apt: `Unable to locate package python3-fastapi` (or similar) | Enable universe (setup step 2), or install those packages with pip |
+| Login says "Wrong token" | Type only the hex part, not `export K1_WEB_TOKEN=`. Run `echo $K1_WEB_TOKEN` in the terminal that ran `ros2 launch`; the server keeps the token it was started with. |
 | `K1_WEB_TOKEN is not set` | `source ~/.k1_web/token.sh` in the same terminal before launching |
 | Page says "arm silent" | Driver not running or wrong `port:=`. Run `ros2 topic hz /joint_states` (expect ~50 Hz). |
 | Sliders stay greyed out | Click **Enable motors** first, then wait for "enabled" in the header |

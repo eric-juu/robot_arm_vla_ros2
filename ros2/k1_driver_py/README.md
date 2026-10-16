@@ -31,14 +31,17 @@ See `config/k1_driver.yaml`. Notable ones:
 
 The SDK is installed with pip, and the ROS package is built with colcon. The repo root has its own `setup.py`, so point colcon at the `ros2/` folder with `--base-paths`. Otherwise colcon stops at the repo root and never finds this package.
 
+The full setup is in the [top-level README](../../README.md#setup-once-on-the-linux-pc). In short, with the repo at `~/Downloads/robot_arm_vla_ros2`:
+
 ```bash
 # dependencies
 sudo apt install python3-serial python3-numpy python3-tqdm
-pip install --no-deps -e ~/ros2_ws/src/Unitree-K1-SDK      # add --break-system-packages on Ubuntu 24.04 (Jazzy)
+pip install --no-deps -e ~/Downloads/robot_arm_vla_ros2 --break-system-packages   # leave out the flag on Humble
 
 # build
-cd ~/ros2_ws
-colcon build --base-paths src/Unitree-K1-SDK/ros2
+source /opt/ros/jazzy/setup.bash
+mkdir -p ~/ros2_ws && cd ~/ros2_ws
+colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2
 source install/setup.bash
 
 # run

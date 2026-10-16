@@ -19,15 +19,24 @@
       e.preventDefault();
       const error = document.getElementById("error");
       error.hidden = true;
-      const res = await fetch("/login", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({token: document.getElementById("token").value}),
-      });
+      let res;
+      try {
+        res = await fetch("/login", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({token: document.getElementById("token").value}),
+        });
+      } catch (err) {
+        error.textContent = "Can't reach the server. Is k1_web running?";
+        error.hidden = false;
+        return;
+      }
       if (res.ok) {
         location.reload();
       } else {
-        error.textContent = "Wrong token.";
+        error.textContent = res.status === 401
+          ? "Wrong token. Use only the hex part, as printed by: echo $K1_WEB_TOKEN"
+          : `Server error (${res.status}). Check the ros2 launch terminal.`;
         error.hidden = false;
       }
     });

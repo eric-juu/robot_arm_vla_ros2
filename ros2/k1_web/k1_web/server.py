@@ -78,7 +78,7 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
     @app.post("/login")
     async def login(request: Request):
         try:
-            token = str((await request.json()).get("token", ""))
+            token = str((await request.json()).get("token", "")).strip()   # forgive copy-paste whitespace
         except (ValueError, AttributeError):
             token = ""
         if not secrets.compare_digest(token, config.token):

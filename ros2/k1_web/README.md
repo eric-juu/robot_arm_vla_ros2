@@ -20,30 +20,27 @@ The browser only ever sends *goals*. The `k1_web` node enforces safety on the se
 
 ## Install
 
-```bash
-sudo apt install python3-fastapi python3-uvicorn python3-websockets python3-yaml \
-                 ros-$ROS_DISTRO-v4l2-camera ros-$ROS_DISTRO-image-transport-plugins
-cd ~/ros2_ws
-colcon build --base-paths src/robot_arm_vla_ros2/ros2
-source install/setup.bash
-```
-
-To use the camera, your user needs to be in the `video` group (`sudo usermod -aG video $USER`, then log in again).
+Follow the setup steps in the [top-level README](../../README.md#setup-once-on-the-linux-pc). They cover:
+- the apt packages, including enabling universe, with a pip fallback;
+- installing the SDK;
+- the `dialout`/`video` groups;
+- building with `colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2`;
+- sourcing `~/ros2_ws/install/setup.bash` in every terminal.
 
 ## Run
 
 ```bash
-export K1_WEB_TOKEN=$(openssl rand -hex 16)     # keep this; it's the password for the page
-echo $K1_WEB_TOKEN
-
-# real arm + camera + web
-ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
+source ~/.k1_web/token.sh       # exports K1_WEB_TOKEN; created in the top-level README
+echo $K1_WEB_TOKEN              # the login token: only these 32 hex characters
 
 # no hardware: fake arm, no camera
 ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false
+
+# real arm + camera + web
+ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
 ```
 
-Then open `http://127.0.0.1:8080` on the PC, or the Tailscale URL (below) from anywhere, and sign in with the token.
+Then open `http://127.0.0.1:8080` on the PC, or the Tailscale URL (below) from anywhere, and sign in with the token. The server keeps the token it was started with, so restart the launch if you change it.
 
 Launch arguments: `port`, `mock`, `use_camera`, `video_device`, `web_params_file`, `camera_params_file` (`--show-args` lists them).
 
@@ -147,6 +144,6 @@ asyncio.run(main())
 ## Tests
 
 ```bash
-colcon test --packages-select k1_web --base-paths src/robot_arm_vla_ros2/ros2 && colcon test-result --verbose
+colcon test --packages-select k1_web --base-paths ~/Downloads/robot_arm_vla_ros2/ros2 && colcon test-result --verbose
 # or, without ROS: cd ros2/k1_web && python -m pytest test
 ```
