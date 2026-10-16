@@ -94,6 +94,8 @@ class UnitreeK1Robot:
 
         self.joint_position_measured = np.zeros(7)
         self.joint_position_target = np.zeros(7)
+        # time.monotonic() of the last servo state report, None until the first one arrives
+        self.joint_position_timestamp = None
 
         self.calibration = None
 
@@ -132,7 +134,11 @@ class UnitreeK1Robot:
     def receive_handler(self):
         print("[K1] <RxThread> receive handler started")
         while self.is_connected:
-            self.parse_datagram()
+            try:
+                self.parse_datagram()
+            except Exception as e:
+                # keep the thread alive so joint_position_measured keeps updating
+                print(f"[K1] <RxThread> error while parsing datagram: {e!r}")
             # print("[K1] <RxThread> thread received datagram")
     
     def start_receive_thread(self):
@@ -143,18 +149,37 @@ class UnitreeK1Robot:
         time.sleep(0.1)
 
     def parse_datagram(self):
-        msg_start = self.port_handler.read(2)
-        n_bytes = self.port_handler.read(1)[0]
-        message = self.port_handler.read(n_bytes)
-        checksum = self.port_handler.read(1)
-        msg_end = self.port_handler.read(1)
+        # scan for the start identifier, discarding any bytes before it, so that we
+        # resynchronize instead of crashing if we join the stream mid-packet
+        prev_byte = b""
+        while self.is_connected:
+            byte = self.port_handler.read(1)
+            if not byte:
+                return None     # read timed out
+            if prev_byte + byte == MSG_START:
+                break
+            prev_byte = byte
+        else:
+            return None
+
+        n_bytes_bytes = self.port_handler.read(1)
+        if not n_bytes_bytes:
+            return None
+        n_bytes = n_bytes_bytes[0]
+
+        # payload, checksum and end identifier
+        rest = self.port_handler.read(n_bytes + 2)
+        if len(rest) != n_bytes + 2:
+            return None
+        message = rest[:n_bytes]
+        checksum = rest[n_bytes:n_bytes + 1]
+        msg_end = rest[n_bytes + 1:]
 
         checksum_expected = self._calculate_checksum(n_bytes, message)
 
-        
-        assert msg_start == MSG_START
-        assert msg_end == MSG_END
-        assert checksum == checksum_expected, f"checksum mismatch: {checksum} != {checksum_expected}"
+        # drop corrupted or misaligned packets; the next call will search for a new start identifier
+        if msg_end != MSG_END or checksum != checksum_expected or n_bytes < 2:
+            return None
 
         cmd_type = message[1]
         if cmd_type == Command.CMD_UPGRADE:
@@ -183,6 +208,7 @@ class UnitreeK1Robot:
                 ], dtype=np.float32)
 
                 self.joint_position_measured[:] = joint_raw / 1800.0 * np.pi
+                self.joint_position_timestamp = time.monotonic()
 
         elif cmd_type == Command.CMD_GET_SERVO_RT_INFO:
             print(message[0])
@@ -293,12 +319,16 @@ class UnitreeK1Robot:
     def update(self):
         self.parse_datagram()
 
-    def send_joint_position_target(self):
+    def send_joint_position_target(self, duration_ms: int = 0):
         """
         Writes the target joint positions to the robot
+
+        Args:
+            duration_ms (int): The time the arm takes to reach the target, in milliseconds.
+                0 moves there as fast as possible.
         """
         self._send_arm_all_server_time(
-            0,
+            duration_ms,
             self.joint_position_target[0],
             self.joint_position_target[1],
             self.joint_position_target[2],
@@ -308,9 +338,9 @@ class UnitreeK1Robot:
         )
         self.set_gripper_rad(self.joint_position_target[6])
 
-    def step(self, actions: np.ndarray):
+    def step(self, actions: np.ndarray, duration_ms: int = 0):
         self.joint_position_target[:] = actions
-        self.send_joint_position_target()
+        self.send_joint_position_target(duration_ms)
         
 
     # ====== lerobot compatibility ======
