@@ -10,6 +10,45 @@ Software for the Unitree K1 (Sagittarius) arm: a Python SDK, a ROS 2 driver, and
 
 All of it runs on the Linux PC the arm and camera are plugged into: Ubuntu 24.04 + ROS 2 Jazzy. Ubuntu 22.04 + Humble also works; replace `jazzy` with `humble` below and leave out `--break-system-packages`. You only need a browser on the device you control it from.
 
+## Every session
+
+Once the [one-time setup](#setup-once-on-the-linux-pc) is done, and you've [created your token](#1-pick-a-password-token-once), this is all you do each time you use the arm.
+
+**On the Linux PC:**
+
+1. Power on the arm, and plug in its USB cable and the camera.
+2. Open a terminal. ROS and the workspace load automatically from `~/.bashrc` (setup step 6).
+3. Start everything:
+   ```bash
+   source ~/.k1_web/token.sh
+   ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0 tunnel:=true
+   ```
+   To test without hardware instead, use `ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false tunnel:=true`.
+4. Wait for the boxed `https://….trycloudflare.com` link in the output. **It's a new link every session.**
+
+**On your phone or laptop:**
+
+5. Open the link, which can take ~30 s to start working, and sign in with your token. You have to sign in again each session, because each new link is a new site to the browser. To see the token: `source ~/.k1_web/token.sh && echo $K1_WEB_TOKEN`.
+6. Click **Enable motors** and drive the arm (see [Drive the arm](#4-drive-the-arm)).
+
+**When you're done:**
+
+7. Move the arm to a safe resting pose, and support it if needed.
+8. Click **Disable motors**. The arm goes limp.
+9. Press **Ctrl+C** in the launch terminal. That stops the driver, camera, web server and tunnel, and the link stops working.
+
+**If the code changed since last time** (someone pushed to GitHub), update before step 3:
+
+```bash
+cd ~/Downloads/robot_arm_vla_ros2 && git pull
+cd ~/ros2_ws && colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2
+source ~/ros2_ws/install/setup.bash
+```
+
+When you change the code yourself on another computer, commit and `git push` there, then run the update above on the Linux PC. Only the Linux PC needs ROS; the other computer only edits code.
+
+Optional: add `source ~/.k1_web/token.sh` to `~/.bashrc` too (`echo 'source ~/.k1_web/token.sh' >> ~/.bashrc`), and step 3 becomes just the `ros2 launch` line.
+
 ## Setup (once, on the Linux PC)
 
 The code can live in any folder. These instructions keep the repo in `~/Downloads/robot_arm_vla_ros2`, and build it in `~/ros2_ws`, where colcon puts its `build/`, `install/` and `log/` folders. If your clone is somewhere else, change the paths to match.
