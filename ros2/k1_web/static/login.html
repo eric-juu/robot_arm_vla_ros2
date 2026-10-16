@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>K1 Arm · Sign in</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login">
+  <form id="login" class="card">
+    <h1>K1 Arm</h1>
+    <label for="token">Access token</label>
+    <input id="token" type="password" autocomplete="current-password" autofocus required>
+    <button type="submit" class="primary">Sign in</button>
+    <p id="error" class="error" hidden></p>
+  </form>
+  <script>
+    document.getElementById("login").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const error = document.getElementById("error");
+      error.hidden = true;
+      const res = await fetch("/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({token: document.getElementById("token").value}),
+      });
+      if (res.ok) {
+        location.reload();
+      } else {
+        error.textContent = "Wrong token.";
+        error.hidden = false;
+      }
+    });
+  </script>
+</body>
+</html>

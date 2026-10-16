@@ -1,0 +1,9 @@
+# Default named poses. Joints are the 6 arm joints in radians, gripper is 1.0 open .. 0.0 closed (optional).
+# Poses saved from the web UI go to ~/.k1_web/poses.yaml and override these.
+poses:
+  zero:
+    joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  # TODO: measure a safe home pose on the real arm and save it from the UI, or fill it in here
+  # home:
+  #   joints: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  #   gripper: 1.0

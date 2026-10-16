@@ -1,0 +1,11 @@
+# Parameters for v4l2_camera_node (sudo apt install ros-$ROS_DISTRO-v4l2-camera ros-$ROS_DISTRO-image-transport-plugins)
+# List the cameras and their formats with: v4l2-ctl --list-devices; v4l2-ctl -d /dev/video0 --list-formats-ext
+camera:
+  ros__parameters:
+    video_device: /dev/video0
+    image_size: [640, 480]
+    camera_frame_id: wrist_camera
+    # JPEG quality of /image_raw/compressed. The parameter name depends on the image_transport version;
+    # check it with `ros2 param list /camera | grep jpeg`.
+    image_raw.jpeg_quality: 80
+    image_raw.compressed.jpeg_quality: 80

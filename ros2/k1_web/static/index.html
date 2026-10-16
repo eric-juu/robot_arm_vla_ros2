@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>K1 Arm</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>K1 Arm</h1>
+    <span id="conn" class="badge off">disconnected</span>
+    <span id="arm" class="badge off">no state</span>
+    <button id="logout" class="link">Sign out</button>
+  </header>
+
+  <main>
+    <section class="camera card">
+      <img id="video" alt="wrist camera">
+      <p id="video-status" class="muted">waiting for camera…</p>
+    </section>
+
+    <section class="controls card">
+      <div class="row">
+        <button id="enable" class="primary">Enable motors</button>
+        <button id="stop" class="danger" title="Hold the current position (Space or Esc)">STOP</button>
+      </div>
+
+      <h2>Joints <span class="muted">(rad · measured)</span></h2>
+      <div id="joints"></div>
+
+      <h2>Gripper <span class="muted">(0 closed … 1 open)</span></h2>
+      <div class="joint">
+        <label for="gripper">gripper</label>
+        <input id="gripper" type="range" min="0" max="1" step="0.01" value="1">
+        <output id="gripper-value">–</output>
+      </div>
+
+      <h2>Poses</h2>
+      <div id="poses" class="row wrap"></div>
+      <button id="save-pose">Save current pose…</button>
+
+      <p id="message" class="muted"></p>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

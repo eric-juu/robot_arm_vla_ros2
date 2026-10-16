@@ -1,0 +1,18 @@
+k1_web:
+  ros__parameters:
+    host: 127.0.0.1             # only reachable through the tunnel (tailscale serve); 0.0.0.0 exposes it on the LAN
+    port: 8080
+    control_rate_hz: 50.0       # how often the smoothed command is sent to the driver
+    state_rate_hz: 20.0         # how often state is pushed to web clients
+    max_joint_velocity: 0.5     # rad/s, applied to every joint
+    # per joint limits in radians, order: shoulder_pan, shoulder_lift, elbow_flex, wrist_roll, wrist_flex, gripper_roll
+    # conservative placeholders, measure and widen them on the real arm. Write them as floats (1.0, not 1).
+    joint_limits_min: [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
+    joint_limits_max: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    state_timeout_sec: 0.5      # stop driving the arm if joint_states is older than this
+    deadman_timeout_sec: 1.0    # hold position if no client message arrives for this long
+    video_max_fps: 15.0
+    image_topic: /image_raw/compressed
+    poses_file: ""                          # "" = config/poses.yaml in this package
+    user_poses_file: ~/.k1_web/poses.yaml   # where "save pose" writes, "" disables saving
+    secure_cookie: false        # true once the site is only ever served over https
