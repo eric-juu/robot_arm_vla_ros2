@@ -74,7 +74,12 @@ class K1Client:
             thread = threading.Thread(target=target, daemon=True)
             thread.start()
             self._threads.append(thread)
-        self.request({"type": "hello", "role": self.role})
+        try:
+            self.request({"type": "hello", "role": self.role})
+        except K1Error as e:
+            self.close()
+            raise K1Error("k1_web did not answer 'hello'. The server is probably running older code: on the "
+                          "arm PC, git pull, colcon build, source install/setup.bash, then restart ros2 launch") from e
         self.wait_for(lambda s: True, timeout=self.timeout)
         return self
 

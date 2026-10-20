@@ -95,6 +95,15 @@ Start `claude` in this folder, after sourcing `token.sh`, so the MCP server inhe
   - Names starting with `_` are rejected, and a time limit applies.
   - This is a guardrail, not a security sandbox. Run the agent on a machine without other secrets, as ASPIRE also advises.
 
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `no reply to 'hello'` / `k1_web did not answer 'hello'` | The web server is older than the agent. On the arm PC: `git pull`, `colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2`, `source ~/ros2_ws/install/setup.bash`, and restart `ros2 launch`. The page should then show an **Agent log** panel. |
+| `could not connect … 401` / `HTTP 403` | `K1_WEB_TOKEN` isn't set in this terminal, or it differs from the one the server started with. Run `source ~/.k1_web/token.sh`. |
+| Every move returns `not_ready` | The motors are off. Enable them on the web page. |
+| Every move returns `safety_interlock` | Add `--allow-motion`. |
+
 ## Tests
 
 ```bash
