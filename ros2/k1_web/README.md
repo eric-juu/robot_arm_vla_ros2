@@ -149,8 +149,17 @@ Messages you can send on `/ws`. Any message also counts as a heartbeat; send at 
 | `{"type":"pose","name":"zero"}` | move to a named pose |
 | `{"type":"stop"}` | hold the current position |
 | `{"type":"save_pose","name":"..."}` | save the measured pose. Reply: `info` |
+| `{"type":"hello","role":"agent"}` | say who you are (`human` is the default). The page shows a banner while an agent is connected |
+| `{"type":"agent_note","text":"..."}` | show a line in every page's Agent log |
 
-The server pushes `{"type":"state", names, positions, stale, enabled, ready, goal, commanded, gripper, limits_min, limits_max, poses}` at `state_rate_hz`, and `{"type":"error","message":...}` when a command is rejected.
+Add `"id": <any>` to a message to get exactly one reply carrying that id: `ack`, `error`, `enable_result` or `info`.
+
+The server pushes these messages:
+- `{"type":"state", names, positions, stale, enabled, ready, goal, commanded, gripper, limits_min, limits_max, poses, clients}` at `state_rate_hz`. `clients` counts connections by role.
+- `{"type":"error","message":...}` when a command is rejected.
+- `{"type":"event","name":"stop","by":role}` to everyone when someone presses STOP. The agent aborts its task when a human does.
+
+The [agent package](../../agent/README.md) wraps all of this in a blocking client (`k1_agent.client.K1Client`).
 
 Minimal Python client:
 

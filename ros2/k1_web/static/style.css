@@ -121,3 +121,23 @@ body.login input {
   background: var(--bg);
   color: var(--text);
 }
+
+.banner {
+  margin: 0 16px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  font-weight: 600;
+}
+.log { grid-column: 1 / -1; }
+.log ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}

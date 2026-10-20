@@ -85,7 +85,11 @@ function showMessage(text, isError) {
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onopen = () => { reconnectDelay = 500; setBadge("conn", "connected", "on"); };
+  ws.onopen = () => {
+    reconnectDelay = 500;
+    setBadge("conn", "connected", "on");
+    send({type: "hello", role: "human"});
+  };
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = (e) => {
     setBadge("conn", "disconnected", "off");
@@ -103,6 +107,20 @@ function handle(msg) {
   else if (msg.type === "error") showMessage(msg.message, true);
   else if (msg.type === "enable_result") showMessage(msg.message, !msg.success);
   else if (msg.type === "info") showMessage(msg.message, false);
+  else if (msg.type === "agent_note") logLine(msg.text);
+  else if (msg.type === "event" && msg.name === "stop") logLine(`STOP pressed (${msg.by})`);
+}
+
+const MAX_LOG_LINES = 200;
+let logEmpty = true;
+
+function logLine(text) {
+  const log = $("agent-log");
+  if (logEmpty) { log.replaceChildren(); logEmpty = false; }
+  const li = document.createElement("li");
+  li.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+  log.prepend(li);
+  while (log.children.length > MAX_LOG_LINES) log.lastChild.remove();
 }
 
 // ---- rendering ----
@@ -117,6 +135,8 @@ function render() {
   if (!state) setBadge("arm", "no state", "off");
   else if (state.stale) setBadge("arm", "arm silent", "warn");
   else setBadge("arm", state.enabled ? (ready ? "enabled" : "enabling…") : "motors off", state.enabled ? "on" : "off");
+
+  $("agent-banner").hidden = !(state && state.clients && state.clients.agent > 0);
 
   $("enable").textContent = state && state.enabled ? "Disable motors" : "Enable motors";
   $("enable").disabled = !state;

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "k1-agent"
+version = "0.1.0"
+description = "AI agent for the Unitree K1 arm over the k1_web API (ASPIRE-style primitives, traces, skills, MCP)"
+requires-python = ">=3.10"
+dependencies = ["websockets>=12", "pyyaml"]
+
+[project.optional-dependencies]
+anthropic = ["anthropic"]
+openai = ["openai>=1.66"]
+mcp = ["mcp"]
+all = ["anthropic", "openai>=1.66", "mcp"]
+test = ["pytest", "fastapi", "uvicorn", "httpx"]
+
+[project.scripts]
+k1-agent = "k1_agent.cli:main"
+
+[tool.setuptools]
+packages = ["k1_agent", "k1_agent.providers"]

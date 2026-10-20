@@ -7,6 +7,7 @@ Software for the Unitree K1 (Sagittarius) arm: a Python SDK, a ROS 2 driver, and
 | Python SDK | `src/unitree_k1_sdk/` | Talks to the arm over serial. Use it directly from scripts (`examples/`). |
 | ROS 2 driver | `ros2/k1_driver_py/` | Exposes the arm as ROS topics and services. See [its README](ros2/k1_driver_py/README.md) and [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md). |
 | Web control | `ros2/k1_web/` | Browser UI with joint sliders, saved poses and a live camera feed, reachable from anywhere through a Cloudflare tunnel. See [its README](ros2/k1_web/README.md). |
+| AI agent | `agent/` | An LLM (Claude, or OpenAI GPT-5.x / GPT-6 Astra) that does tasks through the web API, with traces, a skill library and an MCP server. See [its README](agent/README.md). |
 
 All of it runs on the Linux PC the arm and camera are plugged into: Ubuntu 24.04 + ROS 2 Jazzy. Ubuntu 22.04 + Humble also works; replace `jazzy` with `humble` below and leave out `--break-system-packages`. You only need a browser on the device you control it from.
 
@@ -158,6 +159,14 @@ source ~/.k1_web/token.sh && echo $K1_WEB_TOKEN
 
 That prints only the 32 hex characters, which is what you type on the login page. Don't type the `export K1_WEB_TOKEN=` part. The token stays the same until you rewrite `token.sh`. If you do rewrite it, restart `ros2 launch`, because the server keeps the token it was started with.
 
+Optional: a second, easier password for testing. It's kept on the PC only, never in the repo:
+
+```bash
+echo 'export K1_WEB_ADMIN_PASSWORD=<your-password>' >> ~/.k1_web/token.sh
+```
+
+The server then accepts it at login (and as a Bearer token) just like the token, and logs a warning at startup. Remove the line and restart `ros2 launch` to turn it off. Anyone with the tunnel link can try it, so keep it non-obvious and turn it off when you're done testing.
+
 ### 2. Start everything
 
 ```bash
@@ -223,10 +232,18 @@ ros2 bag record /image_raw/compressed /joint_states /joint_position_command /gri
 
 The web server also serves `/snapshot.jpg` (a single frame) and `/video.mjpeg` (a stream) to logged-in clients.
 
-## Scripts and the future AI agent
+## AI agent and scripts
 
-There are three ways to drive the arm from code, from highest to lowest level:
+The **AI agent** (`agent/`) takes a task in plain words ("pick up the red block") and does it through the web API. It sees the wrist camera and shows its steps in the page's Agent log; STOP on the page aborts it. Setup and usage are in the [agent README](agent/README.md). In short:
 
+```bash
+k1-agent observe                                    # connection check
+k1-agent run "turn the base left a little" --allow-motion
+```
+
+There are three ways to drive the arm from your own code, from highest to lowest level:
+
+- **Agent primitives:** `from k1_agent.client import K1Client` and `from k1_agent.primitives import Primitives` give blocking calls like `move_joints(...)` and `observe()` (see the agent README).
 - **Web API:** connect to `ws://…/ws` with `Authorization: Bearer $K1_WEB_TOKEN` and send JSON goals. This gets the same limits, smoothing and stop-on-disconnect as the page. Protocol and a Python example are in the [k1_web README](ros2/k1_web/README.md#api-for-scripts-and-the-future-agent).
 - **ROS topics:** publish to `/joint_position_command` and `/gripper_command` directly (see [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md)). There are no limits or smoothing at this level, so use small steps.
 - **Python SDK, without ROS:** `python examples/demo.py /dev/ttyACM0`. Stop the ROS driver first, because only one program can own the serial port.
@@ -235,6 +252,7 @@ There are three ways to drive the arm from code, from highest to lowest level:
 
 ```bash
 cd ros2/k1_web && python -m pytest test
+cd agent && python -m pytest tests      # needs the agent's test extras, see agent/README.md
 ```
 
 ## Troubleshooting

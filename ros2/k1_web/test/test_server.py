@@ -10,6 +10,7 @@ from k1_web.poses import PoseStore  # noqa: E402
 from k1_web.server import WebConfig, create_app  # noqa: E402
 
 TOKEN = "test-token-0123456789"
+ADMIN = "admin-password-test"
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def setup(tmp_path):
         controller.set_enabled(value)
         return True, "motors enabled" if value else "motors disabled"
 
-    app = create_app(controller, poses, enable_fn, WebConfig(TOKEN, str(static)))
+    app = create_app(controller, poses, enable_fn, WebConfig(TOKEN, str(static), admin_password=ADMIN))
     return TestClient(app), controller, poses, tmp_path
 
 
@@ -66,6 +67,18 @@ def test_bearer_token(setup):
     client, _, _, _ = setup
     with client.websocket_connect("/ws", headers={"Authorization": f"Bearer {TOKEN}"}) as ws:
         assert ws.receive_json()["type"] == "state"
+
+
+def test_admin_password(setup):
+    client, controller, poses, tmp_path = setup
+    with client.websocket_connect("/ws", headers={"Authorization": f"Bearer {ADMIN}"}) as ws:
+        assert ws.receive_json()["type"] == "state"
+    assert client.post("/login", json={"token": ADMIN}).status_code == 200
+    assert client.get("/").text == "index.html"
+
+    no_admin = TestClient(create_app(controller, poses, None, WebConfig(TOKEN, str(tmp_path / "static"))))
+    assert no_admin.post("/login", json={"token": ADMIN}).status_code == 401
+    assert no_admin.post("/login", json={"token": ""}).status_code == 401
 
 
 def test_control_flow_over_websocket(setup):
@@ -106,3 +119,35 @@ def test_control_flow_over_websocket(setup):
     assert controller.snapshot()["goal"] == controller.snapshot()["commanded"]     # deadman on disconnect
     assert poses.get("here")["joints"] == [0.1] * 6
     assert PoseStore("", str(tmp_path / "user" / "poses.yaml")).names() == ["here"]     # persisted
+
+
+def receive_until(ws, kind):
+    msg = ws.receive_json()
+    while msg["type"] != kind:
+        msg = ws.receive_json()
+    return msg
+
+
+def test_roles_stop_broadcast_and_notes(setup):
+    client, _, _, _ = setup
+    login(client)
+    with client.websocket_connect("/ws") as human, \
+            client.websocket_connect("/ws", headers={"Authorization": f"Bearer {TOKEN}"}) as agent:
+        agent.send_json({"type": "hello", "role": "agent", "id": 1})
+        assert receive_until(agent, "ack") == {"type": "ack", "id": 1}
+        for _ in range(50):     # states queued before the hello still count the agent as human
+            if receive_until(human, "state")["clients"] == {"human": 1, "agent": 1}:
+                break
+        else:
+            raise AssertionError("agent never showed up in state.clients")
+
+        agent.send_json({"type": "agent_note", "text": "  looking for the cup  "})
+        assert receive_until(human, "agent_note") == {"type": "agent_note", "text": "looking for the cup", "by": "agent"}
+
+        human.send_json({"type": "stop"})
+        assert receive_until(agent, "event") == {"type": "event", "name": "stop", "by": "human"}
+
+        agent.send_json({"type": "goal", "positions": [0.0] * 6, "id": "g1"})
+        assert receive_until(agent, "error") == {"type": "error", "message": "motors are disabled", "id": "g1"}
+        agent.send_json({"type": "hello", "role": "root", "id": 2})
+        assert "role" in receive_until(agent, "error")["message"]

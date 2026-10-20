@@ -8,10 +8,12 @@ a PoseStore and an async `enable_fn(bool) -> (success, message)`.
     GET  /static/<f>    UI assets
     GET  /video.mjpeg   camera as an MJPEG stream
     GET  /snapshot.jpg  latest camera frame
-    WS   /ws            JSON protocol, see handle_message()
+    WS   /ws            JSON protocol, see handle_message(). A message with an "id" gets exactly
+                        one reply (ack, error, enable_result or info) echoing that id.
 
 Everything except the login page and the UI assets needs the session cookie or an
-`Authorization: Bearer <token>` header (for scripts and agents).
+`Authorization: Bearer <token>` header (for scripts and agents). The optional admin password
+(K1_WEB_ADMIN_PASSWORD) works anywhere the token does.
 """
 import asyncio
 import hashlib
@@ -29,12 +31,15 @@ from k1_web.poses import PoseStore
 COOKIE_NAME = "k1_session"
 STATIC_FILES = {"app.js", "style.css"}
 MJPEG_BOUNDARY = "k1frame"
+CLIENT_ROLES = ("human", "agent")
+MAX_NOTE_CHARS = 500
 
 
 class WebConfig:
     def __init__(self, token: str, static_dir: str, state_rate_hz: float = 20.0,
-                 video_max_fps: float = 15.0, secure_cookie: bool = False):
+                 video_max_fps: float = 15.0, secure_cookie: bool = False, admin_password: str = ""):
         self.token = token
+        self.admin_password = admin_password     # optional second password (K1_WEB_ADMIN_PASSWORD), "" = off
         self.static_dir = static_dir
         self.state_rate_hz = state_rate_hz
         self.video_max_fps = video_max_fps
@@ -49,13 +54,19 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
     # the cookie holds a value derived from the token, not the token itself
     session_value = hmac.new(config.token.encode(), b"k1_web_session", hashlib.sha256).hexdigest()
 
+    def is_valid_secret(value: str) -> bool:
+        valid = secrets.compare_digest(value, config.token)
+        if config.admin_password:
+            valid |= secrets.compare_digest(value, config.admin_password)
+        return valid
+
     def is_authenticated(conn) -> bool:
         cookie = conn.cookies.get(COOKIE_NAME, "")
         if cookie and secrets.compare_digest(cookie, session_value):
             return True
         auth = conn.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
-            return secrets.compare_digest(auth[7:].strip(), config.token)
+            return is_valid_secret(auth[7:].strip())
         return False
 
     def require_auth(request: Request):
@@ -81,7 +92,7 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             token = str((await request.json()).get("token", "")).strip()   # forgive copy-paste whitespace
         except (ValueError, AttributeError):
             token = ""
-        if not secrets.compare_digest(token, config.token):
+        if not is_valid_secret(token):
             await asyncio.sleep(1.0)    # slow down guessing
             return JSONResponse({"ok": False, "message": "wrong token"}, status_code=401)
         response = JSONResponse({"ok": True})
@@ -128,15 +139,32 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
 
     # ---- control ----
 
-    def state_message() -> dict:
-        return {"type": "state", **controller.snapshot(), "poses": poses.names()}
+    clients: dict[int, dict] = {}       # connection id -> {"role", "send"}
 
-    async def handle_message(msg) -> dict | None:
+    def state_message() -> dict:
+        roles = [c["role"] for c in clients.values()]
+        return {"type": "state", **controller.snapshot(), "poses": poses.names(),
+                "clients": {role: roles.count(role) for role in CLIENT_ROLES}}
+
+    async def broadcast(msg: dict):
+        for client in list(clients.values()):
+            try:
+                await client["send"](msg)
+            except Exception:       # that connection is closing, its own handler cleans up
+                pass
+
+    async def handle_message(msg, conn: dict) -> dict | None:
         """Apply one client message. Returns the reply to send, if any."""
         if not isinstance(msg, dict) or not isinstance(msg.get("type"), str):
             raise CommandError("messages must be JSON objects with a 'type'")
         kind = msg["type"]
         if kind == "ping":
+            return None
+        if kind == "hello":
+            role = msg.get("role")
+            if role not in CLIENT_ROLES:
+                raise CommandError(f"'role' must be one of {list(CLIENT_ROLES)}")
+            conn["role"] = role
             return None
         if kind == "goal":
             controller.set_goal(msg.get("positions"))
@@ -146,6 +174,8 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             return None
         if kind == "stop":
             controller.stop()
+            # everyone hears about it, so an agent aborts its task when a human presses STOP
+            await broadcast({"type": "event", "name": "stop", "by": conn["role"]})
             return None
         if kind == "pose":
             pose = poses.get(msg.get("name"))
@@ -163,6 +193,12 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             name = msg.get("name")
             poses.save(name, controller.measured_arm(), controller.gripper)
             return {"type": "info", "message": f"saved pose {name!r}"}
+        if kind == "agent_note":
+            text = msg.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise CommandError("'text' must be a non-empty string")
+            await broadcast({"type": "agent_note", "text": text.strip()[:MAX_NOTE_CHARS], "by": conn["role"]})
+            return None
         raise CommandError(f"unknown message type {kind!r}")
 
     @app.websocket("/ws")
@@ -182,24 +218,33 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
                 await send(state_message())
                 await asyncio.sleep(1.0 / config.state_rate_hz)
 
+        conn = {"role": "human", "send": send}
+        clients[id(conn)] = conn
         controller.client_connected()
         sender = asyncio.create_task(send_state())
         try:
             while True:
                 text = await websocket.receive_text()
                 controller.heartbeat()
+                msg_id = None
                 try:
-                    reply = await handle_message(json.loads(text))
+                    msg = json.loads(text)
+                    msg_id = msg.get("id") if isinstance(msg, dict) else None
+                    reply = await handle_message(msg, conn)
                 except json.JSONDecodeError:
                     reply = {"type": "error", "message": "invalid JSON"}
                 except CommandError as e:
                     reply = {"type": "error", "message": str(e)}
+                # a message with an "id" always gets exactly one reply carrying that id
+                if msg_id is not None:
+                    reply = {**(reply or {"type": "ack"}), "id": msg_id}
                 if reply is not None:
                     await send(reply)
         except WebSocketDisconnect:
             pass
         finally:
             sender.cancel()
+            clients.pop(id(conn), None)
             controller.client_disconnected()
 
     return app

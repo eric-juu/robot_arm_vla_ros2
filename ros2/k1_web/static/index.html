@@ -14,6 +14,8 @@
     <button id="logout" class="link">Sign out</button>
   </header>
 
+  <div id="agent-banner" class="banner" hidden>AI agent connected. STOP (Space / Esc) aborts its task.</div>
+
   <main>
     <section class="camera card">
       <img id="video" alt="wrist camera">
@@ -41,6 +43,11 @@
       <button id="save-pose">Save current pose…</button>
 
       <p id="message" class="muted"></p>
+    </section>
+
+    <section class="log card">
+      <h2>Agent log</h2>
+      <ol id="agent-log" class="muted"><li>no agent messages yet</li></ol>
     </section>
   </main>
 

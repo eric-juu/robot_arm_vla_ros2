@@ -1,0 +1,26 @@
+# k1-agent settings. Command-line flags override these.
+
+url: http://127.0.0.1:8080      # k1_web; or the https://….trycloudflare.com link to run the agent elsewhere
+
+provider: anthropic             # anthropic | openai
+models:
+  anthropic: claude-opus-5-5
+  openai: gpt-5.5
+  # GPT-6 Astra: set provider: openai and models.openai to the Astra model id once you have API access
+openai_reasoning_effort: null   # e.g. low | medium | high, for OpenAI reasoning models
+
+mode: tools                     # tools (one primitive per step, sees every frame) | code (writes a program)
+max_turns: 40                   # model turns per run in tools mode
+attempts: 3                     # program attempts in code mode, with an operator reset between them
+program_timeout: 180            # seconds per program
+max_tokens: 4096
+image_history: 3                # camera frames kept in the conversation; older ones are dropped
+
+# safety, on top of k1_web's own limits
+max_steps: 60                   # motion calls per run
+max_step_rad: 0.2               # cap for move_joint_delta
+tolerance: 0.05                 # rad; a move counts as reached within this
+move_timeout: 10                # seconds a move may take
+
+runs_dir: runs                  # traces: runs/<time>-<task>/trace.jsonl + frames (relative to this file)
+skills_dir: skills              # the skill library (relative to this file)

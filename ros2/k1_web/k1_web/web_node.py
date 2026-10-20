@@ -12,7 +12,8 @@ Bridges the web server (k1_web.server) to the k1_driver node:
     Calls:
         enable                  std_srvs/SetBool
 
-The auth token is read from the K1_WEB_TOKEN environment variable.
+The auth token is read from the K1_WEB_TOKEN environment variable. An optional second password,
+K1_WEB_ADMIN_PASSWORD, is accepted the same way.
 """
 import asyncio
 import os
@@ -128,13 +129,17 @@ def main(args=None):
     node = K1WebNode()
     if len(token) < 16:
         node.get_logger().warning("K1_WEB_TOKEN is short, use at least 16 random characters")
+    admin_password = os.environ.get("K1_WEB_ADMIN_PASSWORD", "").strip()
+    if admin_password:
+        node.get_logger().warning("K1_WEB_ADMIN_PASSWORD is set: it is accepted at login like the token")
 
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
 
-    config = WebConfig(token, node.static_dir, node.state_rate_hz, node.video_max_fps, node.secure_cookie)
+    config = WebConfig(token, node.static_dir, node.state_rate_hz, node.video_max_fps, node.secure_cookie,
+                       admin_password)
     app = create_app(node.controller, node.poses, node.set_enabled, config)
     node.get_logger().info(f"serving on http://{node.host}:{node.port}")
     try:
