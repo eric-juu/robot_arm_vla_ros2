@@ -239,6 +239,8 @@ The **AI agent** (`agent/`) takes a task in plain words ("pick up the red block"
 ```bash
 k1-agent observe                                    # connection check
 k1-agent run "turn the base left a little" --allow-motion
+k1-agent login                                      # optional: use Claude Code (a Claude account) as the model
+k1-agent serve --provider claude-code --allow-motion   # then type tasks into the page's Agent card
 ```
 
 There are three ways to drive the arm from your own code, from highest to lowest level:

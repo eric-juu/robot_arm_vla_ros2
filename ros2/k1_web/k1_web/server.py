@@ -33,6 +33,9 @@ STATIC_FILES = {"app.js", "style.css"}
 MJPEG_BOUNDARY = "k1frame"
 CLIENT_ROLES = ("human", "agent")
 MAX_NOTE_CHARS = 500
+MAX_PROMPT_CHARS = 2000
+AGENT_MODES = ("tools", "code")
+QUESTION_KINDS = ("ask", "confirm", "reset")
 
 
 class WebConfig:
@@ -139,12 +142,37 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
 
     # ---- control ----
 
-    clients: dict[int, dict] = {}       # connection id -> {"role", "send"}
+    clients: dict[int, dict] = {}       # connection id -> {"role", "send", "status"}
+
+    def agent_status() -> dict | None:
+        """Status of the agent service (`k1-agent serve`) that takes prompts, if one is connected."""
+        for c in clients.values():
+            if c["role"] == "agent" and c.get("status"):
+                return c["status"]
+        return None
 
     def state_message() -> dict:
         roles = [c["role"] for c in clients.values()]
         return {"type": "state", **controller.snapshot(), "poses": poses.names(),
-                "clients": {role: roles.count(role) for role in CLIENT_ROLES}}
+                "clients": {role: roles.count(role) for role in CLIENT_ROLES}, "agent": agent_status()}
+
+    async def send_to(role: str, msg: dict):
+        for client in list(clients.values()):
+            if client["role"] == role:
+                try:
+                    await client["send"](msg)
+                except Exception:
+                    pass
+
+    def text_field(msg, name: str, limit: int) -> str:
+        text = msg.get(name)
+        if not isinstance(text, str) or not text.strip():
+            raise CommandError(f"'{name}' must be a non-empty string")
+        return text.strip()[:limit]
+
+    def require_role(conn: dict, role: str, kind: str):
+        if conn["role"] != role:
+            raise CommandError(f"{kind!r} is only for {role} clients")
 
     async def broadcast(msg: dict):
         for client in list(clients.values()):
@@ -194,10 +222,46 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             poses.save(name, controller.measured_arm(), controller.gripper)
             return {"type": "info", "message": f"saved pose {name!r}"}
         if kind == "agent_note":
-            text = msg.get("text")
-            if not isinstance(text, str) or not text.strip():
-                raise CommandError("'text' must be a non-empty string")
-            await broadcast({"type": "agent_note", "text": text.strip()[:MAX_NOTE_CHARS], "by": conn["role"]})
+            await broadcast({"type": "agent_note", "text": text_field(msg, "text", MAX_NOTE_CHARS), "by": conn["role"]})
+            return None
+        # ---- prompting the agent service from the page ----
+        if kind == "agent_prompt":         # human -> agent service
+            require_role(conn, "human", kind)
+            text = text_field(msg, "text", MAX_PROMPT_CHARS)
+            mode = msg.get("mode", "tools")
+            if mode not in AGENT_MODES:
+                raise CommandError(f"'mode' must be one of {list(AGENT_MODES)}")
+            status = agent_status()
+            if status is None:
+                raise CommandError("no agent service is running (start `k1-agent serve` on the PC)")
+            if status.get("state") != "idle":
+                raise CommandError("the agent is busy; wait for it to finish, or press STOP")
+            await send_to("agent", {"type": "agent_prompt", "text": text, "mode": mode})
+            await broadcast({"type": "agent_note", "text": f"prompt: {text[:MAX_NOTE_CHARS]}", "by": "human"})
+            return None
+        if kind == "agent_status":         # agent service -> everyone, through state["agent"]
+            require_role(conn, "agent", kind)
+            status = msg.get("status")
+            if not isinstance(status, dict) or status.get("state") not in ("idle", "running"):
+                raise CommandError("'status' must be an object with state 'idle' or 'running'")
+            conn["status"] = {k: (bool(v) if k == "allow_motion" else str(v)[:200]) for k, v in status.items()
+                              if k in ("state", "task", "provider", "model", "allow_motion")}
+            return None
+        if kind == "agent_question":       # agent -> humans
+            require_role(conn, "agent", kind)
+            question_kind = msg.get("kind", "ask")
+            if question_kind not in QUESTION_KINDS:
+                raise CommandError(f"'kind' must be one of {list(QUESTION_KINDS)}")
+            await send_to("human", {"type": "agent_question", "qid": str(msg.get("qid", ""))[:64],
+                                    "text": text_field(msg, "text", MAX_NOTE_CHARS), "kind": question_kind})
+            return None
+        if kind == "agent_answer":         # human -> agents, and to other pages so they close the question
+            require_role(conn, "human", kind)
+            answer = msg.get("text", "")
+            if not isinstance(answer, str):
+                raise CommandError("'text' must be a string")
+            await broadcast({"type": "agent_answer", "qid": str(msg.get("qid", ""))[:64],
+                             "text": answer.strip()[:MAX_NOTE_CHARS]})
             return None
         raise CommandError(f"unknown message type {kind!r}")
 

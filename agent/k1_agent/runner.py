@@ -128,10 +128,17 @@ def extract_code(text: str) -> str | None:
     return max(blocks, key=len).strip() if blocks else None
 
 
+THINKING_TYPES = {"thinking", "redacted_thinking"}
+
+
 def prune_images(messages: list[dict], keep: int):
-    """Keep only the newest `keep` camera frames in the conversation, to bound tokens."""
-    seen = 0
-    for msg in reversed(messages):
+    """Keep only the newest `keep` camera frames in the conversation, to bound tokens.
+
+    Claude's thinking blocks are signed against everything before them, so once an earlier frame
+    is replaced, the thinking blocks of later assistant turns are dropped (the API accepts that)."""
+    seen, first_changed = 0, None
+    for index in reversed(range(len(messages))):
+        msg = messages[index]
         groups = [msg["content"]] if msg["role"] == "user" else (
             [r["content"] for r in msg["results"]] if msg["role"] == "tool" else [])
         for parts in groups:
@@ -140,6 +147,15 @@ def prune_images(messages: list[dict], keep: int):
                     seen += 1
                     if seen > keep:
                         parts[i] = text_part("[older camera frame omitted]")
+                        first_changed = index
+    if first_changed is None:
+        return
+    for msg in messages[first_changed + 1:]:
+        if msg["role"] == "assistant":
+            raw = msg["reply"].raw
+            kept = [b for b in raw if not (isinstance(b, dict) and b.get("type") in THINKING_TYPES)]
+            if len(kept) != len(raw):
+                msg["reply"].raw = kept or [{"type": "text", "text": msg["reply"].text or "(thinking omitted)"}]
 
 
 def result_text(result: dict) -> str:

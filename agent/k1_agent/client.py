@@ -21,6 +21,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect
 
 DEFAULT_URL = "http://127.0.0.1:8080"
+INBOX_TYPES = {"agent_prompt", "agent_answer"}     # messages from the web page, read with next_message()
 
 
 class K1Error(Exception):
@@ -56,6 +57,7 @@ class K1Client:
         self._state: dict | None = None
         self._state_seq = 0         # counts state messages, so waits can ignore states sent before a command
         self._replies: dict = {}
+        self._inbox: list[dict] = []
         self._ids = itertools.count(1)
         self._closed = False
         self._stopped = False
@@ -109,6 +111,9 @@ class K1Client:
                         self._state_seq += 1
                     elif kind == "event" and msg.get("name") == "stop" and msg.get("by") != self.role:
                         self._stopped = True
+                    elif kind in INBOX_TYPES:
+                        self._inbox.append(msg)
+                        del self._inbox[:-100]
                     if "id" in msg:
                         self._replies[msg["id"]] = msg
                     self._cond.notify_all()
@@ -136,6 +141,29 @@ class K1Client:
     def check_stopped(self):
         if self._stopped:
             raise StoppedByOperator("STOP was pressed by the operator")
+
+    def clear_stopped(self):
+        """Start fresh after a STOP, for a long-running service that takes the next task."""
+        with self._cond:
+            self._stopped = False
+
+    def next_message(self, predicate, timeout: float | None, stop_aware: bool = True) -> dict | None:
+        """Take the oldest message from the web page (agent_prompt, agent_answer) matching predicate.
+        Returns None on timeout; `timeout=None` waits forever. Raises on STOP when stop_aware."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._cond:
+            while True:
+                if stop_aware:
+                    self.check_stopped()
+                for i, msg in enumerate(self._inbox):
+                    if predicate(msg):
+                        return self._inbox.pop(i)
+                if self._closed:
+                    raise K1Error("connection lost")
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return None
+                self._cond.wait(0.2 if remaining is None else min(remaining, 0.2))
 
     def send(self, msg: dict):
         if self._closed or self._ws is None:

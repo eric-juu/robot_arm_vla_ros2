@@ -151,11 +151,15 @@ Messages you can send on `/ws`. Any message also counts as a heartbeat; send at 
 | `{"type":"save_pose","name":"..."}` | save the measured pose. Reply: `info` |
 | `{"type":"hello","role":"agent"}` | say who you are (`human` is the default). The page shows a banner while an agent is connected |
 | `{"type":"agent_note","text":"..."}` | show a line in every page's Agent log |
+| `{"type":"agent_prompt","text":"...","mode":"tools"}` | (human) give a task to the agent service (`k1-agent serve`). Error if no service is connected or it is busy |
+| `{"type":"agent_status","status":{"state":"idle","provider":...,"model":...}}` | (agent) report the service's state (`idle` / `running`); shown as `state.agent` |
+| `{"type":"agent_question","qid":"...","text":"...","kind":"ask"}` | (agent) ask the people on the page; `kind` is `ask`, `confirm` or `reset` |
+| `{"type":"agent_answer","qid":"...","text":"..."}` | (human) answer a question; sent to everyone |
 
 Add `"id": <any>` to a message to get exactly one reply carrying that id: `ack`, `error`, `enable_result` or `info`.
 
 The server pushes these messages:
-- `{"type":"state", names, positions, stale, enabled, ready, goal, commanded, gripper, limits_min, limits_max, poses, clients}` at `state_rate_hz`. `clients` counts connections by role.
+- `{"type":"state", names, positions, stale, enabled, ready, goal, commanded, gripper, limits_min, limits_max, poses, clients, agent}` at `state_rate_hz`. `clients` counts connections by role; `agent` is the agent service's status, or null.
 - `{"type":"error","message":...}` when a command is rejected.
 - `{"type":"event","name":"stop","by":role}` to everyone when someone presses STOP. The agent aborts its task when a human does.
 

@@ -46,6 +46,34 @@
     </section>
 
     <section class="log card">
+      <h2>Agent <span id="agent-status" class="muted">· no agent service (start <code>k1-agent serve</code> on the PC)</span></h2>
+
+      <div id="agent-question" class="question" hidden>
+        <p id="agent-question-text"></p>
+        <form id="agent-answer-form" class="row">
+          <input id="agent-answer" type="text" autocomplete="off" placeholder="Your answer">
+          <button type="submit" class="primary">Answer</button>
+        </form>
+        <div id="agent-confirm" class="row" hidden>
+          <button id="agent-yes" class="primary">Yes</button>
+          <button id="agent-no">No</button>
+        </div>
+        <div id="agent-reset" class="row" hidden>
+          <button id="agent-ready" class="primary">Done, scene is reset</button>
+        </div>
+      </div>
+
+      <form id="prompt-form" class="prompt">
+        <textarea id="prompt" rows="2" maxlength="2000" placeholder="Tell the agent what to do, e.g. &quot;point the camera at the red cup&quot;" disabled></textarea>
+        <div class="row">
+          <select id="prompt-mode" title="tools: one step at a time, sees every frame · code: writes a program">
+            <option value="tools">tools</option>
+            <option value="code">code</option>
+          </select>
+          <button id="prompt-send" type="submit" class="primary" disabled>Send to agent</button>
+        </div>
+      </form>
+
       <h2>Agent log</h2>
       <ol id="agent-log" class="muted"><li>no agent messages yet</li></ol>
     </section>

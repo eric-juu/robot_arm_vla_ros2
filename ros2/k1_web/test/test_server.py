@@ -151,3 +151,39 @@ def test_roles_stop_broadcast_and_notes(setup):
         assert receive_until(agent, "error") == {"type": "error", "message": "motors are disabled", "id": "g1"}
         agent.send_json({"type": "hello", "role": "root", "id": 2})
         assert "role" in receive_until(agent, "error")["message"]
+
+
+def test_prompting_the_agent_service(setup):
+    client, _, _, _ = setup
+    login(client)
+    with client.websocket_connect("/ws") as human, \
+            client.websocket_connect("/ws", headers={"Authorization": f"Bearer {TOKEN}"}) as agent:
+        human.send_json({"type": "agent_prompt", "text": "wave", "id": 1})
+        assert "no agent service" in receive_until(human, "error")["message"]
+
+        agent.send_json({"type": "hello", "role": "agent", "id": 1})
+        receive_until(agent, "ack")
+        agent.send_json({"type": "agent_status", "status": {"state": "idle", "provider": "claude-code"}, "id": 2})
+        receive_until(agent, "ack")
+        for _ in range(50):
+            if receive_until(human, "state")["agent"] == {"state": "idle", "provider": "claude-code"}:
+                break
+        else:
+            raise AssertionError("agent status never showed up in state")
+
+        human.send_json({"type": "agent_prompt", "text": " wave hello ", "mode": "code", "id": 2})
+        assert receive_until(human, "ack") == {"type": "ack", "id": 2}
+        assert receive_until(agent, "agent_prompt") == {"type": "agent_prompt", "text": "wave hello", "mode": "code"}
+        agent.send_json({"type": "agent_prompt", "text": "loop", "id": 3})
+        assert "only for human" in receive_until(agent, "error")["message"]
+
+        agent.send_json({"type": "agent_question", "qid": "q1", "text": "Is the cup there?", "kind": "confirm"})
+        assert receive_until(human, "agent_question") == {
+            "type": "agent_question", "qid": "q1", "text": "Is the cup there?", "kind": "confirm"}
+        human.send_json({"type": "agent_answer", "qid": "q1", "text": "yes"})
+        assert receive_until(agent, "agent_answer") == {"type": "agent_answer", "qid": "q1", "text": "yes"}
+
+        agent.send_json({"type": "agent_status", "status": {"state": "running", "task": "wave"}, "id": 4})
+        receive_until(agent, "ack")
+        human.send_json({"type": "agent_prompt", "text": "again", "id": 5})
+        assert "busy" in receive_until(human, "error")["message"]

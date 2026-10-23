@@ -58,6 +58,50 @@ export OPENAI_API_KEY=...        # for provider: openai
 
 To run the agent on another machine, use `--url https://<link>.trycloudflare.com` (or set `url:` in `config.yaml`).
 
+## Claude Code as the model (sign in, no API key)
+
+With `--provider claude-code` the agent is a headless Claude Code session, billed to the Claude account Claude Code is signed in with instead of an API key.
+
+1. Install Claude Code on the PC that runs the agent (https://claude.com/claude-code), then sign in once:
+   ```bash
+   k1-agent login            # runs `claude auth login`; opens a browser or prints a link
+   k1-agent login --status   # check
+   ```
+   On a PC without a browser, run `claude setup-token` on any machine and `export CLAUDE_CODE_OAUTH_TOKEN=...` (in `~/.k1_agent/keys.sh`).
+2. Run tasks as usual:
+   ```bash
+   k1-agent run "point the camera at the cup" --provider claude-code --allow-motion
+   ```
+   Or set `provider: claude-code` in `config.yaml`. `claude_code.model` (or `--model sonnet|opus|haiku`) picks the model.
+
+How it is locked down:
+- **Tools:** Claude Code gets only the k1 MCP tools. `--tools ""` turns off its shell, file and web tools.
+- **Same limits:** the MCP server runs with this run's `--allow-motion`, `--allow-enable` and `--max-steps`, so the interlocks match `k1-agent run`.
+- **Questions:** they appear on the web page, not in the terminal.
+- **STOP:** STOP on the page ends the session.
+- **API key:** `ANTHROPIC_API_KEY` is removed from Claude Code's environment, so the signed-in account pays. To bill the key instead, set `claude_code.use_api_key: true`.
+- **Traces:** the run's narration and tool calls go to `runs/<time>-<task>/`. The MCP server's own trace, with frames, goes to `runs/<time>-mcp/`.
+
+## Prompting from the web page
+
+`k1-agent serve` keeps the agent connected and runs the tasks people type into the page's **Agent** card, one at a time:
+
+```bash
+k1-agent serve --provider claude-code --allow-motion      # or --provider anthropic / openai
+```
+
+- **The card shows:**
+  - the provider and model;
+  - whether the agent is ready or running;
+  - "dry run" when the service has no `--allow-motion`.
+- **Sending a task:** type it and press Enter (Shift+Enter adds a new line). Pick `tools` or `code` mode first.
+- **Agent questions:**
+  - questions show up in the card with an answer box;
+  - yes/no checks, such as "save a skill draft?", get Yes and No buttons;
+  - between code-mode attempts, a "scene is reset" button.
+- **STOP** (Esc, or Space when not typing) ends the current task. The service then waits for the next prompt.
+- **What the page can't change:** the safety flags. They come only from the `serve` command line.
+
 ## Using Claude Code (or Codex) as the agent
 
 ```bash
@@ -70,7 +114,8 @@ Start `claude` in this folder, after sourcing `token.sh`, so the MCP server inhe
 
 | Setting | Meaning |
 |---|---|
-| `provider`, `models` | which LLM: `anthropic` or `openai`, and the model id for each |
+| `provider`, `models` | which LLM: `anthropic`, `openai` or `claude-code`, and the model id for each |
+| `claude_code` | Claude Code's command, model, whether to use an API key, a per-task timeout |
 | `mode` | `tools` or `code` |
 | `max_turns`, `attempts`, `program_timeout` | how long a run may go on |
 | `max_steps` | motion calls per run (`--max-steps`) |
@@ -103,6 +148,8 @@ Start `claude` in this folder, after sourcing `token.sh`, so the MCP server inhe
 | `could not connect … 401` / `HTTP 403` | `K1_WEB_TOKEN` isn't set in this terminal, or it differs from the one the server started with. Run `source ~/.k1_web/token.sh`. |
 | Every move returns `not_ready` | The motors are off. Enable them on the web page. |
 | Every move returns `safety_interlock` | Add `--allow-motion`. |
+| `Claude Code is not signed in` | Run `k1-agent login` (or set `CLAUDE_CODE_OAUTH_TOKEN`). |
+| The page says "no agent service is running" | Start `k1-agent serve` on the PC, and keep that terminal open. |
 
 ## Tests
 

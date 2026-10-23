@@ -32,7 +32,9 @@ def with_frame(prims: Primitives, result: dict) -> list:
     return [text(result)] + ([Image(data=frame, format="jpeg")] if frame else [])
 
 
-def build_server(prims: Primitives, skills: SkillLibrary):
+def build_server(prims: Primitives, skills: SkillLibrary, operator=None):
+    """`operator` (e.g. WebOperator) adds an ask_operator tool; leave it out when a human is
+    already chatting with the agent, as in an interactive Claude Code session."""
     server = Server("k1-arm", instructions=INSTRUCTIONS)
 
     @server.tool()
@@ -43,6 +45,7 @@ def build_server(prims: Primitives, skills: SkillLibrary):
             "robot": "Unitree K1, 6-DoF arm + gripper, wrist camera (no depth)",
             "tools": ["observe", "move_joints", "move_joint_delta", "go_pose", "go_home", "set_gripper", "stop",
                       "wait", "list_skills", "read_skill", "save_skill_draft", "note"] +
+                     (["ask_operator"] if operator is not None else []) +
                      (["enable"] if prims.allow_enable else []),
             "allow_motion": prims.allow_motion,
             "allow_enable": prims.allow_enable,
@@ -114,6 +117,13 @@ def build_server(prims: Primitives, skills: SkillLibrary):
             return f"saved for review: {skills.save_draft(name, markdown)}"
         except ValueError as e:
             return f"not saved: {e}"
+
+    if operator is not None:
+        @server.tool()
+        def ask_operator(question: str) -> str:
+            """Ask the human operator (through the web page) and wait for the answer, e.g. to place or reset
+            an object, or when unsure whether something is safe."""
+            return operator.ask(question)
 
     if prims.allow_enable:
         @server.tool()

@@ -56,15 +56,51 @@ $("enable").addEventListener("click", () => {
 
 const stop = () => { pendingGoal = false; lastUserEdit = 0; send({type: "stop"}); };
 $("stop").addEventListener("click", stop);
+const isTyping = (el) => el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && el.type === "text"));
 document.addEventListener("keydown", (e) => {
-  // the page has no text fields, so these keys always mean STOP (even with a slider focused)
-  if (e.key === "Escape" || e.key === " ") { e.preventDefault(); stop(); }
+  // Esc always means STOP; Space too, except while typing in the prompt or an answer
+  if (e.key === "Escape" || (e.key === " " && !isTyping(e.target))) { e.preventDefault(); stop(); }
 });
 
 $("save-pose").addEventListener("click", () => {
   const name = prompt("Pose name (letters, digits, _ or -):");
   if (name) send({type: "save_pose", name});
 });
+
+// ---- agent: prompts and questions ----
+
+$("prompt-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("prompt").value.trim();
+  if (!text) return;
+  send({type: "agent_prompt", text, mode: $("prompt-mode").value, id: "prompt"});
+});
+$("prompt").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("prompt-form").requestSubmit(); }
+});
+
+let question = null;    // the agent's open question: {qid, text, kind}
+
+function showQuestion(q) {
+  question = q;
+  $("agent-question").hidden = !q;
+  if (!q) return;
+  $("agent-question-text").textContent = q.text;
+  $("agent-answer-form").hidden = q.kind !== "ask";
+  $("agent-confirm").hidden = q.kind !== "confirm";
+  $("agent-reset").hidden = q.kind !== "reset";
+  $("agent-answer").value = "";
+  if (q.kind === "ask") $("agent-answer").focus();
+}
+
+function answer(text) {
+  if (question) send({type: "agent_answer", qid: question.qid, text});
+  showQuestion(null);
+}
+$("agent-answer-form").addEventListener("submit", (e) => { e.preventDefault(); answer($("agent-answer").value); });
+$("agent-yes").addEventListener("click", () => answer("yes"));
+$("agent-no").addEventListener("click", () => answer("no"));
+$("agent-ready").addEventListener("click", () => answer("ready"));
 
 $("logout").addEventListener("click", async () => {
   await fetch("/logout", {method: "POST"});
@@ -104,6 +140,15 @@ setInterval(() => send({type: "ping"}), PING_INTERVAL_MS);
 
 function handle(msg) {
   if (msg.type === "state") { state = msg; render(); }
+  else if (msg.id === "prompt") {         // reply to "Send to agent"
+    if (msg.type === "error") logLine(`not sent: ${msg.message}`);
+    else $("prompt").value = "";
+  }
+  else if (msg.type === "agent_question") { showQuestion(msg); logLine(`agent asks: ${msg.text}`); }
+  else if (msg.type === "agent_answer") {
+    if (question && question.qid === msg.qid) showQuestion(null);     // answered here or on another page
+    logLine(`answer: ${msg.text || "(empty)"}`);
+  }
   else if (msg.type === "error") showMessage(msg.message, true);
   else if (msg.type === "enable_result") showMessage(msg.message, !msg.success);
   else if (msg.type === "info") showMessage(msg.message, false);
@@ -137,6 +182,15 @@ function render() {
   else setBadge("arm", state.enabled ? (ready ? "enabled" : "enabling…") : "motors off", state.enabled ? "on" : "off");
 
   $("agent-banner").hidden = !(state && state.clients && state.clients.agent > 0);
+
+  const agent = state ? state.agent : null;
+  const idle = !!(agent && agent.state === "idle");
+  $("agent-status").textContent = !agent ? "· no agent service (start k1-agent serve on the PC)"
+    : `· ${agent.provider}:${agent.model} · ${agent.state === "running" ? `running: ${agent.task}` : "ready"}` +
+      (agent.allow_motion === false ? " · dry run (no motion)" : "");
+  $("prompt").disabled = !agent;
+  $("prompt-send").disabled = !idle;
+  if (!agent && question) showQuestion(null);
 
   $("enable").textContent = state && state.enabled ? "Disable motors" : "Enable motors";
   $("enable").disabled = !state;

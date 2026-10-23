@@ -133,3 +133,25 @@ def test_helpers():
     prune_images(messages, keep=2)
     assert messages[0]["content"][0]["type"] == "text"
     assert messages[1]["results"][0]["content"][0]["type"] == "image"
+
+
+def test_pruning_drops_thinking_signed_against_old_frames():
+    img = {"type": "image", "jpeg": b"x"}
+    thinking = {"type": "thinking", "thinking": "...", "signature": "sig"}
+    tool_use = {"type": "tool_use", "id": "1", "name": "observe", "input": {}}
+    early = Reply("", [], [thinking, tool_use])
+    late = Reply("", [], [dict(thinking), dict(tool_use)])
+    messages = [{"role": "user", "content": [img]},
+                {"role": "assistant", "reply": early},
+                {"role": "tool", "results": [{"id": "1", "name": "observe", "content": [dict(img)]}]},
+                {"role": "assistant", "reply": late},
+                {"role": "tool", "results": [{"id": "1", "name": "observe", "content": [dict(img)]}]}]
+
+    prune_images(messages, keep=3)          # nothing pruned: thinking stays
+    assert early.raw[0]["type"] == "thinking" and late.raw[0]["type"] == "thinking"
+
+    prune_images(messages, keep=2)          # the first frame goes, so both later thinking blocks go too
+    assert early.raw == [tool_use] and late.raw == [tool_use]
+
+    prune_images(messages, keep=1)          # also prunes the frame after `early`: `late` is after it
+    assert late.raw == [tool_use]

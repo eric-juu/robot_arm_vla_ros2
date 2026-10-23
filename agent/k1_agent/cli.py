@@ -5,9 +5,12 @@ k1-agent command line.
     k1-agent run "TASK" --allow-motion [--mode code]   run the agent on a task
     k1-agent skills [list|pending|show NAME|approve NAME|reject NAME]
     k1-agent mcp --allow-motion                        MCP server for Claude Code / Codex
+    k1-agent login [--status]                          sign in to Claude Code (for --provider claude-code)
+    k1-agent serve --allow-motion                      take tasks from the web page's prompt box
 
 The k1_web token comes from K1_WEB_TOKEN (or K1_WEB_ADMIN_PASSWORD); API keys from ANTHROPIC_API_KEY
-or OPENAI_API_KEY.
+or OPENAI_API_KEY. The claude-code provider needs no key: it uses the Claude account Claude Code is
+signed in with.
 """
 import argparse
 import json
@@ -16,6 +19,7 @@ import sys
 
 import yaml
 
+from k1_agent.claude_code import ClaudeCodeError
 from k1_agent.client import K1Client, K1Error
 from k1_agent.primitives import Primitives
 from k1_agent.skills import SkillLibrary
@@ -29,7 +33,8 @@ def load_config(path: str | None) -> dict:
     path = path or DEFAULT_CONFIG
     with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
-    base = os.path.dirname(os.path.abspath(path))
+    config["config_path"] = os.path.abspath(path)
+    base = os.path.dirname(config["config_path"])
     for key in ("runs_dir", "skills_dir"):     # relative to the config file
         config[key] = os.path.join(base, os.path.expanduser(config.get(key, key.split("_")[0])))
     return config
@@ -39,6 +44,11 @@ def add_safety_args(p: argparse.ArgumentParser):
     p.add_argument("--allow-motion", action="store_true", help="let the agent move the arm (off by default)")
     p.add_argument("--allow-enable", action="store_true", help="let the agent enable/disable the motors")
     p.add_argument("--max-steps", type=int, help="motion calls allowed in this run")
+
+
+def add_provider_args(p: argparse.ArgumentParser):
+    p.add_argument("--provider", choices=["anthropic", "openai", "claude-code"])
+    p.add_argument("--model")
 
 
 def make_prims(config, args, client, trace=None) -> Primitives:
@@ -60,40 +70,111 @@ def cmd_observe(config, args):
             print("no camera frame (is the camera node running?)")
 
 
-def cmd_run(config, args):
-    from k1_agent.providers.base import make_provider
-    from k1_agent.runner import AgentRunner, ConsoleOperator
+def mcp_safety_args(args) -> list[str]:
+    """The run's safety flags, passed on to the `k1-agent mcp` server that Claude Code starts."""
+    flags = (["--allow-motion"] if args.allow_motion else []) + (["--allow-enable"] if args.allow_enable else [])
+    return flags + (["--max-steps", str(args.max_steps)] if args.max_steps else [])
 
+
+def build_task_runner(config, args, client, log=print):
+    """Returns (run_task(text, mode, operator) -> RunResult, info) for the chosen provider."""
     provider_name = args.provider or config["provider"]
+    skills = SkillLibrary(config["skills_dir"])
+
+    if provider_name == "claude-code":
+        from k1_agent.claude_code import ClaudeCodeRunner, login_status
+
+        cc = config.get("claude_code") or {}
+        command = cc.get("command") or "claude"
+        if not login_status(command).get("loggedIn"):
+            raise ClaudeCodeError("Claude Code is not signed in: run `k1-agent login` first")
+        model = args.model or cc.get("model")
+
+        def run_task(text, mode, operator):
+            trace = Trace(config["runs_dir"], text)
+            log(f"running with Claude Code ({model or 'default model'}); trace in {trace.dir}")
+            runner = ClaudeCodeRunner(client, trace, args.url or config["url"], config["config_path"],
+                                      mcp_safety_args(args), model=model, command=command,
+                                      use_api_key=bool(cc.get("use_api_key")),
+                                      max_budget_usd=cc.get("max_budget_usd"), timeout=cc.get("timeout", 900))
+            return runner.run(text, mode)
+
+        return run_task, {"provider": "claude-code", "model": model or "default", "allow_motion": args.allow_motion}
+
+    from k1_agent.providers.base import make_provider
+    from k1_agent.runner import AgentRunner
+
     model = args.model or config["models"][provider_name]
     kwargs = {}
     if provider_name == "openai" and config.get("openai_reasoning_effort"):
         kwargs["reasoning_effort"] = config["openai_reasoning_effort"]
     provider = make_provider(provider_name, model, **kwargs)
-    skills = SkillLibrary(config["skills_dir"])
-    trace = Trace(config["runs_dir"], args.task)
-    operator = ConsoleOperator()
-    mode = args.mode or config["mode"]
 
-    with K1Client(args.url or config["url"]) as client:
+    def run_task(text, mode, operator):
+        trace = Trace(config["runs_dir"], text)
         prims = make_prims(config, args, client, trace)
-        if not args.allow_motion:
-            print("note: --allow-motion not given, so every motion will be refused (dry run)")
         runner = AgentRunner(provider, prims, skills, trace, operator, max_turns=config["max_turns"],
                              image_history=config["image_history"], max_tokens=config["max_tokens"],
                              program_timeout=config["program_timeout"])
-        print(f"running {mode} mode with {provider_name}:{model}; trace in {trace.dir}")
+        log(f"running {mode} mode with {provider_name}:{model}; trace in {trace.dir}")
         if mode == "code":
-            result = runner.run_code(args.task, attempts=args.attempts or config["attempts"])
+            result = runner.run_code(text, attempts=args.attempts or config["attempts"])
         else:
-            result = runner.run_tools(args.task)
+            result = runner.run_tools(text)
+        if result.success and operator.confirm("Did it really succeed? Save a skill draft from this run?"):
+            path = runner.draft_skill(text)
+            log(f"skill draft: {path}  (review it, then `k1-agent skills approve <name>`)" if path
+                else "could not save a skill draft")
+        return result
+
+    return run_task, {"provider": provider_name, "model": model, "allow_motion": args.allow_motion}
+
+
+def cmd_run(config, args):
+    from k1_agent.runner import ConsoleOperator
+
+    with K1Client(args.url or config["url"]) as client:
+        run_task, info = build_task_runner(config, args, client)
+        if not args.allow_motion:
+            print("note: --allow-motion not given, so every motion will be refused (dry run)")
+        if info["provider"] == "claude-code":
+            print("note: Claude Code's questions appear on the web page")
+        result = run_task(args.task, args.mode or config["mode"], ConsoleOperator())
         print(f"\n{'SUCCESS' if result.success else 'FAILED'} ({result.reason}): {result.summary}")
         print(f"trace: {result.trace_dir}")
-        if result.success and operator.confirm("Did it really succeed? Save a skill draft from this run?"):
-            path = runner.draft_skill(args.task)
-            print(f"skill draft: {path}  (review it, then `k1-agent skills approve <name>`)" if path
-                  else "could not save a skill draft")
     return 0 if result.success else 1
+
+
+def cmd_serve(config, args):
+    from k1_agent.service import AgentService
+
+    with K1Client(args.url or config["url"]) as client:
+        def log(text):
+            print(text)
+            client.note(text[:300])
+
+        run_task, info = build_task_runner(config, args, client, log=log)
+        if not args.allow_motion:
+            print("note: --allow-motion not given, so every motion will be refused (dry run)")
+        print(f"agent service ready ({info['provider']}:{info['model']}). Type tasks into the web page's "
+              "agent card; Ctrl+C here quits.")
+        AgentService(client, run_task, info).serve_forever()
+
+
+def cmd_login(config, args):
+    from k1_agent.claude_code import login, login_status
+
+    command = (config.get("claude_code") or {}).get("command") or "claude"
+    if not args.status:
+        login(command)
+    status = login_status(command)
+    if status.get("loggedIn"):
+        print(f"Claude Code is signed in ({status.get('authMethod', 'unknown method')}). "
+              "Use --provider claude-code, or set provider: claude-code in config.yaml.")
+        return 0
+    print("Claude Code is not signed in. Run `k1-agent login`, or on a PC without a browser run "
+          "`claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN.")
+    return 1
 
 
 def cmd_skills(config, args):
@@ -117,7 +198,11 @@ def cmd_mcp(config, args):
 
     client = K1Client(args.url or config["url"]).connect()
     trace = Trace(config["runs_dir"], "mcp")
-    server = build_server(make_prims(config, args, client, trace), SkillLibrary(config["skills_dir"]))
+    operator = None
+    if args.web_operator:
+        from k1_agent.web_operator import WebOperator
+        operator = WebOperator(client)
+    server = build_server(make_prims(config, args, client, trace), SkillLibrary(config["skills_dir"]), operator)
     try:
         if args.transport == "stdio":
             server.run("stdio")
@@ -139,10 +224,17 @@ def main(argv=None):
     p = sub.add_parser("run", help="run the agent on a task")
     p.add_argument("task")
     p.add_argument("--mode", choices=["tools", "code"])
-    p.add_argument("--provider", choices=["anthropic", "openai"])
-    p.add_argument("--model")
+    add_provider_args(p)
     p.add_argument("--attempts", type=int)
     add_safety_args(p)
+
+    p = sub.add_parser("serve", help="run tasks typed into the web page's agent card")
+    add_provider_args(p)
+    p.add_argument("--attempts", type=int)
+    add_safety_args(p)
+
+    p = sub.add_parser("login", help="sign in to Claude Code, for --provider claude-code")
+    p.add_argument("--status", action="store_true", help="only show whether it is signed in")
 
     p = sub.add_parser("skills", help="manage the skill library")
     p.add_argument("action", nargs="?", default="list", choices=["list", "pending", "show", "approve", "reject"])
@@ -150,6 +242,7 @@ def main(argv=None):
 
     p = sub.add_parser("mcp", help="serve the primitives over MCP")
     p.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
+    p.add_argument("--web-operator", action="store_true", help="add an ask_operator tool answered on the web page")
     add_safety_args(p)
 
     args = parser.parse_args(argv)
@@ -157,9 +250,10 @@ def main(argv=None):
         parser.error(f"skills {args.action} needs a NAME")
     config = load_config(args.config)
     try:
-        return {"observe": cmd_observe, "run": cmd_run, "skills": cmd_skills, "mcp": cmd_mcp}[args.command](
-            config, args) or 0
-    except (K1Error, ValueError) as e:
+        commands = {"observe": cmd_observe, "run": cmd_run, "serve": cmd_serve, "login": cmd_login,
+                    "skills": cmd_skills, "mcp": cmd_mcp}
+        return commands[args.command](config, args) or 0
+    except (K1Error, ValueError, ClaudeCodeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

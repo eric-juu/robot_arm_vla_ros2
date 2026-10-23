@@ -131,6 +131,28 @@ body.login input {
   font-weight: 600;
 }
 .log { grid-column: 1 / -1; }
+.log h2:first-child { margin-top: 0; }
+.prompt { display: grid; gap: 8px; }
+.prompt .row > button { flex: 0 0 auto; }
+.prompt .row { justify-content: flex-end; }
+.prompt textarea, .question input, .prompt select {
+  font: inherit;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+.prompt textarea { width: 100%; resize: vertical; }
+.question {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+}
+.question p { margin: 0 0 8px; font-weight: 600; }
+.question input { flex: 1; min-width: 0; }
+.question .row > button { flex: 0 0 auto; }
 .log ol {
   list-style: none;
   margin: 0;
