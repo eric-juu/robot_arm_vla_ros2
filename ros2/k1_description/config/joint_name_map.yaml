@@ -1,0 +1,15 @@
+# Unitree-K1-SDK (T-K-233) joint index/name  →  URDF joint name
+# The SDK sends and reports radians with the same sign convention as NXROBO's
+# Sagittarius driver (1800/π scaling, no per-joint sign flips), so values pass through 1:1.
+#
+# Gripper: the SDK's index 6 is the gripper servo, not a finger position.
+#   URDF finger position (m) ≈ -servo_raw × 0.026 / 900   (from NXROBO's driver)
+#   0 m = open, -0.034 m = closed. Calibrate against the real fingers before relying on it.
+k1_sdk_to_urdf:
+  0: {sdk: shoulder_pan,  urdf: joint1}
+  1: {sdk: shoulder_lift, urdf: joint2}
+  2: {sdk: elbow_flex,    urdf: joint3}
+  3: {sdk: wrist_roll,    urdf: joint4}
+  4: {sdk: wrist_flex,    urdf: joint5}
+  5: {sdk: gripper_roll,  urdf: joint6}
+  6: {sdk: gripper,       urdf: joint_gripper_left}  # right finger mimics left

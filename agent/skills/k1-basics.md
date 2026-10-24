@@ -6,7 +6,8 @@ description: Joint names, units, gripper values and the safety rules of this arm
 - Joints, in command order: shoulder_pan (turns the whole arm around the base), shoulder_lift, elbow_flex,
   wrist_roll, wrist_flex, gripper_roll. All in radians. 0 rad on every joint is the "zero" pose.
 - Gripper: set_gripper(1.0) opens fully, set_gripper(0.0) closes. observe() reports the command
-  (gripper_command) and the measured gripper joint (gripper_measured, different units).
+  (gripper_command) and the measured finger position (gripper_measured, in metres: 0 open, about -0.036 closed;
+  a value that stops short of the command means the fingers are holding something).
 - The server clamps every goal to the configured joint limits (observe()["limits"]) and moves at a limited
   speed. If a result has "clamped", the arm stopped at the limit and not at your target.
 - "not_reached" usually means the arm is blocked or holding something. Don't push harder: back off, look,

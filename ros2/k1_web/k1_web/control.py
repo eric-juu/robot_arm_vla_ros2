@@ -9,7 +9,12 @@ import math
 import threading
 import time
 
-N_ARM_JOINTS = 6    # shoulder_pan, shoulder_lift, elbow_flex, wrist_roll, wrist_flex, gripper_roll
+ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_roll", "wrist_flex", "gripper_roll"]
+N_ARM_JOINTS = len(ARM_JOINTS)
+JOINT_NAMES = ARM_JOINTS + ["gripper"]
+# joint_states may use these names (k1_description's URDF) or JOINT_NAMES; both map to the same index
+URDF_JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint_gripper_left"]
+JOINT_INDEX = {name: i for names in (JOINT_NAMES, URDF_JOINT_NAMES) for i, name in enumerate(names)}
 
 
 class CommandError(ValueError):
@@ -26,6 +31,25 @@ def validate_positions(positions) -> list[float]:
     if not all(math.isfinite(p) for p in positions):
         raise CommandError("joint positions must be finite")
     return positions
+
+
+def order_joint_state(names, positions) -> list[float] | None:
+    """
+    Puts joint_states positions in JOINT_NAMES order: the 6 arm joints, then the gripper if present.
+
+    Matches by name (JOINT_NAMES or the URDF names). A message with no names, or none of these names, is taken
+    in order. Returns None when an arm joint is missing.
+    """
+    if not any(name in JOINT_INDEX for name in names):
+        return [float(p) for p in positions[:len(JOINT_NAMES)]] if len(positions) >= N_ARM_JOINTS else None
+    ordered: list[float | None] = [None] * len(JOINT_NAMES)
+    for name, position in zip(names, positions):
+        index = JOINT_INDEX.get(name)
+        if index is not None:
+            ordered[index] = float(position)
+    if any(p is None for p in ordered[:N_ARM_JOINTS]):
+        return None
+    return ordered if ordered[N_ARM_JOINTS] is not None else ordered[:N_ARM_JOINTS]
 
 
 def clamp(positions: list[float], limits_min: list[float], limits_max: list[float]) -> list[float]:
@@ -60,7 +84,6 @@ class ArmController:
         self.clock = clock
 
         self._lock = threading.Lock()
-        self._names: list[str] = []
         self._measured: list[float] | None = None
         self._measured_time: float | None = None
         self._enabled = False
@@ -68,6 +91,7 @@ class ArmController:
         self._goal: list[float] | None = None
         self._gripper: float | None = None           # last gripper value sent
         self._pending_gripper: float | None = None
+        self._goal_seq = 0                            # counts goal changes, so a trajectory notices interruptions
         self._clients = 0
         self._last_heartbeat = -math.inf
         self._image: bytes | None = None
@@ -76,11 +100,11 @@ class ArmController:
     # ---- inputs from ROS ----
 
     def on_joint_state(self, names, positions):
-        if len(positions) < N_ARM_JOINTS:
+        ordered = order_joint_state(list(names), list(positions))
+        if ordered is None:
             return
         with self._lock:
-            self._names = list(names)
-            self._measured = [float(p) for p in positions]
+            self._measured = ordered
             self._measured_time = self.clock()
 
     def on_image(self, jpeg: bytes):
@@ -91,6 +115,7 @@ class ArmController:
     def set_enabled(self, enabled: bool):
         with self._lock:
             self._enabled = enabled
+            self._goal_seq += 1
             # while released the arm can be moved by hand, so always reseed from the measured pose
             self._commanded = None
             self._goal = None
@@ -121,11 +146,14 @@ class ArmController:
         if self._commanded is None:
             raise CommandError("waiting for a fresh joint state from the arm")
 
-    def set_goal(self, positions):
+    def set_goal(self, positions) -> int:
+        """Sets the goal, clamped to the limits. Returns the new goal sequence number."""
         positions = validate_positions(positions)
         with self._lock:
             self._require_ready()
             self._goal = clamp(positions, self.limits_min, self.limits_max)
+            self._goal_seq += 1
+            return self._goal_seq
 
     def set_gripper(self, value):
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -136,8 +164,40 @@ class ArmController:
 
     def stop(self):
         with self._lock:
+            self._goal_seq += 1
             if self._commanded is not None:
                 self._goal = list(self._commanded)
+
+    @property
+    def goal_seq(self) -> int:
+        """Changes on every goal, STOP and enable/disable, whoever sent it."""
+        with self._lock:
+            return self._goal_seq
+
+    @property
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def not_ready_reason(self) -> str | None:
+        """Why a goal would not be followed right now, or None if it would."""
+        with self._lock:
+            if not self._enabled:
+                return "motors are disabled"
+            if not self._is_fresh(self.clock()):
+                return "no fresh joint state from the arm"
+            if self._commanded is None:
+                return "waiting for a fresh joint state from the arm"
+            return None
+
+    def commanded_arm(self) -> list[float] | None:
+        with self._lock:
+            return list(self._commanded) if self._commanded is not None else None
+
+    def measured(self) -> list[float] | None:
+        """The last measured positions in JOINT_NAMES order (the gripper only if reported), fresh or not."""
+        with self._lock:
+            return list(self._measured) if self._measured is not None else None
 
     def measured_arm(self) -> list[float]:
         with self._lock:
@@ -192,7 +252,7 @@ class ArmController:
         now = self.clock()
         with self._lock:
             return {
-                "names": list(self._names),
+                "names": JOINT_NAMES[:len(self._measured)] if self._measured is not None else [],
                 "positions": list(self._measured) if self._measured is not None else None,
                 "stale": not self._is_fresh(now),
                 "enabled": self._enabled,

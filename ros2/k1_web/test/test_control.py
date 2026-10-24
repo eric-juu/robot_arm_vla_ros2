@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from k1_web.control import ArmController, CommandError, clamp, step_toward, validate_positions
+from k1_web.control import ArmController, CommandError, clamp, order_joint_state, step_toward, validate_positions
 
 
 class FakeClock:
@@ -125,3 +125,49 @@ def test_disable_resets_and_gripper_is_clamped():
     assert c.snapshot()["commanded"] is None
     with pytest.raises(CommandError):
         c.set_gripper(0.5)
+
+
+def test_joint_states_are_ordered_by_name():
+    urdf = ["joint_gripper_left", "joint6", "joint5", "joint4", "joint3", "joint2", "joint1"]
+    assert order_joint_state(urdf, [7, 6, 5, 4, 3, 2, 1]) == [1, 2, 3, 4, 5, 6, 7]
+    sdk = ["gripper_roll", "wrist_flex", "wrist_roll", "elbow_flex", "shoulder_lift", "shoulder_pan"]
+    assert order_joint_state(sdk, [6, 5, 4, 3, 2, 1]) == [1, 2, 3, 4, 5, 6]     # no gripper reported
+    assert order_joint_state(["joint1", "joint2"], [1, 2]) is None                # arm joints missing
+    assert order_joint_state([], [1, 2, 3, 4, 5, 6, 7]) == [1, 2, 3, 4, 5, 6, 7]  # unnamed: in order
+
+
+def test_snapshot_uses_friendly_names_whatever_joint_states_used():
+    c = make_controller(FakeClock())
+    c.on_joint_state(["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint_gripper_left"],
+                     [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, -0.01])
+    snap = c.snapshot()
+    assert snap["names"] == ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_roll", "wrist_flex",
+                             "gripper_roll", "gripper"]
+    assert snap["positions"] == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, -0.01]
+
+
+def test_goal_seq_changes_on_every_goal_stop_and_enable():
+    c, clock = ready_controller()
+    seq = c.set_goal([0.1] * 6)
+    assert c.goal_seq == seq
+    c.stop()
+    assert c.goal_seq == seq + 1
+    assert c.set_goal([0.2] * 6) == seq + 2
+    c.set_enabled(False)
+    assert c.goal_seq == seq + 3
+
+
+def test_not_ready_reason():
+    clock = FakeClock()
+    c = make_controller(clock)
+    assert c.not_ready_reason() == "motors are disabled"
+    c.set_enabled(True)
+    assert c.not_ready_reason() == "no fresh joint state from the arm"
+    c.on_joint_state([], [0.0] * 7)
+    assert c.not_ready_reason() == "waiting for a fresh joint state from the arm"
+    c.client_connected()
+    c.tick(0.02)
+    assert c.not_ready_reason() is None
+    assert c.commanded_arm() == [0.0] * 6
+    clock.t += 1.0
+    assert c.not_ready_reason() == "no fresh joint state from the arm"

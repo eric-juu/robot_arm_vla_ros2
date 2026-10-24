@@ -1,12 +1,19 @@
 # robot_arm_vla_ros2
 
-Software for the Unitree K1 (Sagittarius) arm: a Python SDK, a ROS 2 driver, and a web page that lets you control the arm remotely and watch its wrist camera.
+Software for the Unitree K1 (Sagittarius) arm, as a ROS 2 workspace:
+- a serial driver;
+- a URDF model;
+- standard trajectory and gripper actions;
+- a web page that lets you control the arm remotely and watch its wrist camera;
+- an AI agent.
 
 | Part | Path | What it does |
 |---|---|---|
-| Python SDK | `src/unitree_k1_sdk/` | Talks to the arm over serial. Use it directly from scripts (`examples/`). |
-| ROS 2 driver | `ros2/k1_driver_py/` | Exposes the arm as ROS topics and services. See [its README](ros2/k1_driver_py/README.md) and [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md). |
-| Web control | `ros2/k1_web/` | Browser UI with joint sliders, saved poses and a live camera feed, reachable from anywhere through a Cloudflare tunnel. See [its README](ros2/k1_web/README.md). |
+| SDK | `ros2/unitree_k1_sdk/` | The serial protocol, as a plain Python library (a ROS package so colcon installs it). See [its README](ros2/unitree_k1_sdk/README.md). |
+| ROS 2 driver | `ros2/k1_driver_py/` | Exposes the arm as ROS topics and services (`joint_states`, `enabled`, `enable`). See [its README](ros2/k1_driver_py/README.md) and [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md). |
+| Arm model | `ros2/k1_description/` | URDF and meshes (from NXROBO's Sagittarius). Gives `/tf` and the RViz model. See [its README](ros2/k1_description/README.md). |
+| Web control and motion | `ros2/k1_web/` | Browser UI with joint sliders, saved poses and a live camera feed, reachable from anywhere through a Cloudflare tunnel. Also the safety layer every motion goes through, and the `FollowJointTrajectory` / `GripperCommand` actions for ROS tools. Holds the bringup launch file. See [its README](ros2/k1_web/README.md). |
+| ROS examples | `ros2/k1_examples/` | `ros2 run k1_examples move/gripper/zero/demo`, and a small client class for your own scripts. See [its README](ros2/k1_examples/README.md). |
 | AI agent | `agent/` | An LLM (Claude, or OpenAI GPT-5.x / GPT-6 Astra) that does tasks through the web API, with traces, a skill library and an MCP server. See [its README](agent/README.md). |
 
 All of it runs on the Linux PC the arm and camera are plugged into: Ubuntu 24.04 + ROS 2 Jazzy. Ubuntu 22.04 + Humble also works; replace `jazzy` with `humble` below and leave out `--break-system-packages`. You only need a browser on the device you control it from.
@@ -72,8 +79,12 @@ sudo add-apt-repository universe
 sudo apt update
 sudo apt install python3-serial python3-numpy python3-tqdm \
                  python3-fastapi python3-uvicorn python3-websockets python3-yaml \
-                 ros-jazzy-v4l2-camera ros-jazzy-image-transport-plugins v4l-utils
+                 ros-jazzy-v4l2-camera ros-jazzy-image-transport-plugins v4l-utils \
+                 ros-jazzy-xacro ros-jazzy-robot-state-publisher ros-jazzy-control-msgs \
+                 ros-jazzy-rviz2 ros-jazzy-joint-state-publisher-gui
 ```
+
+(Most of the `ros-jazzy-*` packages come with `ros-jazzy-desktop` already. `rviz2` and `joint-state-publisher-gui` are only needed for the 3D view.)
 
 If apt still says `Unable to locate package` for any of the `python3-*` packages, leave those out of the apt command and install them with pip instead. ROS uses the system `python3`, so it sees them:
 
@@ -95,11 +106,12 @@ sudo dpkg -i /tmp/cloudflared.deb       # on an ARM PC use cloudflared-linux-arm
 cloudflared --version
 ```
 
-### 3. Install the SDK
+### 3. The SDK (nothing to do)
+
+colcon now builds the SDK as the ROS package `unitree_k1_sdk` (step 5), so there's no pip step. If you installed it with pip before, remove that copy so there's only one:
 
 ```bash
-pip install --no-deps -e ~/Downloads/robot_arm_vla_ros2 --break-system-packages
-python3 -c "import unitree_k1_sdk, os; print(os.path.dirname(unitree_k1_sdk.__file__))"   # should point into the repo
+pip uninstall --break-system-packages Unitree-K1-SDK     # "not installed" is fine
 ```
 
 ### 4. Allow access to the serial port and camera
@@ -118,7 +130,7 @@ mkdir -p ~/ros2_ws && cd ~/ros2_ws
 colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2
 ```
 
-It should end with `Summary: 2 packages finished` (`k1_driver_py` and `k1_web`).
+It should end with `Summary: 5 packages finished` (`unitree_k1_sdk`, `k1_description`, `k1_driver_py`, `k1_examples` and `k1_web`).
 
 ### 6. Load ROS and the workspace in every terminal
 
@@ -128,7 +140,7 @@ ROS only finds these packages in a terminal that has sourced the workspace. With
 echo 'source /opt/ros/jazzy/setup.bash' >> ~/.bashrc
 echo 'source ~/ros2_ws/install/setup.bash' >> ~/.bashrc
 source ~/.bashrc
-ros2 pkg list | grep k1      # expect k1_driver_py and k1_web
+ros2 pkg list | grep k1      # expect k1_description, k1_driver_py, k1_examples, k1_web and unitree_k1_sdk
 ```
 
 ### Updating later
@@ -179,11 +191,19 @@ ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false
 ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0 tunnel:=true
 ```
 
-This starts the arm driver (or the fake arm), the camera, the web server, and, with `tunnel:=true`, the public link. Leave the terminal open; Ctrl+C stops everything. Other variations:
+This starts:
+- the arm driver (or the fake arm);
+- `robot_state_publisher` with the arm model;
+- the camera;
+- the web server;
+- with `tunnel:=true`, the public link.
+
+Leave the terminal open; Ctrl+C stops everything. Other variations:
 
 ```bash
 ros2 launch k1_web k1_bringup.launch.py use_camera:=false              # arm only
 ros2 launch k1_web k1_bringup.launch.py video_device:=/dev/video2      # a different camera
+ros2 launch k1_web k1_bringup.launch.py rviz:=true                     # also a 3D view of the arm (on the PC's desktop)
 ```
 
 If you don't know the arm's port, check `ls /dev/ttyACM* /dev/serial/by-path/`. For the camera, check `v4l2-ctl --list-devices`.
@@ -219,7 +239,7 @@ To run the tunnel without the launch file (for example while the launch is alrea
 
 If you close the tab or lose your connection, the arm stops and holds its position within about a second.
 
-> **First time on the real arm:** joints are limited to ±1.0 rad until you set real limits. With someone standing at the arm, find each joint's safe range and write it into `ros2/k1_web/config/k1_web.yaml` (see the [k1_web README](ros2/k1_web/README.md#first-run-on-the-real-arm)). Then save a `home` pose from the page.
+> **First time on the real arm:** check that the RViz model (`rviz:=true`) matches the real arm's zero pose and joint directions (see the [k1_web README](ros2/k1_web/README.md#first-run-on-the-real-arm)). Joints are limited to ±1.0 rad until you set real limits. With someone standing at the arm, find each joint's safe range and write it into `ros2/k1_web/config/k1_web.yaml` (see the [k1_web README](ros2/k1_web/README.md#first-run-on-the-real-arm)). Then save a `home` pose from the page.
 
 ## Using the camera in ROS
 
@@ -227,7 +247,7 @@ While the camera node runs, frames are published on `/image_raw` and `/image_raw
 
 ```bash
 ros2 topic hz /image_raw/compressed
-ros2 bag record /image_raw/compressed /joint_states /joint_position_command /gripper_command -o my_run
+ros2 bag record /image_raw/compressed /joint_states /tf /joint_position_command /gripper_command -o my_run
 ```
 
 The web server also serves `/snapshot.jpg` (a single frame) and `/video.mjpeg` (a stream) to logged-in clients.
@@ -243,18 +263,22 @@ k1-agent login                                      # optional: use Claude Code 
 k1-agent serve --provider claude-code --allow-motion   # then type tasks into the page's Agent card
 ```
 
-There are three ways to drive the arm from your own code, from highest to lowest level:
+There are several ways to drive the arm from your own code. The first three all go through k1_web's limits, speed limit and STOP:
 
+- **ROS actions:** `arm_controller/follow_joint_trajectory` (`control_msgs/FollowJointTrajectory`) and `gripper_controller/gripper_cmd` (`control_msgs/GripperCommand`), the standard interfaces MoveIt and other ROS tools use. Try them with `ros2 run k1_examples move joint1=0.3`, or use the `K1Arm` class in [k1_examples](ros2/k1_examples/README.md). Details are in the [k1_web README](ros2/k1_web/README.md#ros-2-interface).
 - **Agent primitives:** `from k1_agent.client import K1Client` and `from k1_agent.primitives import Primitives` give blocking calls like `move_joints(...)` and `observe()` (see the agent README).
-- **Web API:** connect to `ws://…/ws` with `Authorization: Bearer $K1_WEB_TOKEN` and send JSON goals. This gets the same limits, smoothing and stop-on-disconnect as the page. Protocol and a Python example are in the [k1_web README](ros2/k1_web/README.md#api-for-scripts-and-the-future-agent).
-- **ROS topics:** publish to `/joint_position_command` and `/gripper_command` directly (see [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md)). There are no limits or smoothing at this level, so use small steps.
-- **Python SDK, without ROS:** `python examples/demo.py /dev/ttyACM0`. Stop the ROS driver first, because only one program can own the serial port.
+- **Web API:** connect to `ws://…/ws` with `Authorization: Bearer $K1_WEB_TOKEN` and send JSON goals. Protocol and a Python example are in the [k1_web README](ros2/k1_web/README.md#api-for-scripts-and-the-future-agent).
+- **Raw ROS topics:** publish to `/joint_position_command` and `/gripper_command` directly (see [COMMANDS.md](ros2/k1_driver_py/COMMANDS.md)). There are no limits or smoothing at this level, so use small steps.
+- **SDK, without ROS:** `python3 ros2/unitree_k1_sdk/examples/demo.py /dev/ttyACM0`. Stop the ROS driver first, because only one program can own the serial port.
+
+The arm's pose in 3D is on `/tf`. For example, `ros2 run tf2_ros tf2_echo world link_grasping_frame` prints where the point between the fingers is.
 
 ## Tests
 
 ```bash
-cd ros2/k1_web && python -m pytest test
-cd agent && python -m pytest tests      # needs the agent's test extras, see agent/README.md
+cd ~/ros2_ws && colcon test --base-paths ~/Downloads/robot_arm_vla_ros2/ros2 && colcon test-result --verbose
+cd ros2/k1_web && python -m pytest test          # or one package without ROS
+cd agent && python -m pytest tests               # needs the agent's test extras, see agent/README.md
 ```
 
 ## Troubleshooting
@@ -274,3 +298,6 @@ cd agent && python -m pytest tests      # needs the agent's test extras, see age
 | Tunnel link shows a Cloudflare error page | Wait ~30 s after the link appears and reload. Check that the web server is running (`curl -I http://127.0.0.1:8080`). |
 | No link ever appears, or `[tunnel] … ERR` lines | The network may block Cloudflare's default protocol. Run `cloudflared tunnel --protocol http2 --url http://127.0.0.1:8080` by hand to try the fallback. |
 | Port 8080 already in use | Another copy is still running. Stop it, or change `port` in `k1_web.yaml`. |
+| `Package 'k1_description' not found`, or xacro / robot_state_publisher errors at launch | Install the `ros-jazzy-xacro ros-jazzy-robot-state-publisher ros-jazzy-control-msgs` packages (setup step 2), then rebuild |
+| `No module named 'unitree_k1_sdk'` | Rebuild (`colcon build --base-paths …/ros2`) and source `~/ros2_ws/install/setup.bash`. The SDK is now part of the workspace |
+| A ROS goal fails with `motors are disabled` or `outside k1_web's joint limits` | Enable the motors on the page (or `--enable`), or stay inside the limits in `k1_web.yaml` |

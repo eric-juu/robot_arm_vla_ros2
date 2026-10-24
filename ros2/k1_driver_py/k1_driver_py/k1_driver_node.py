@@ -4,7 +4,10 @@ ROS 2 driver node for the Unitree K1 arm.
 Wraps `unitree_k1_sdk.UnitreeK1Robot` and exposes it over ROS 2:
 
     Publishes:
-        joint_states            sensor_msgs/JointState      all 7 joints, measured positions
+        joint_states            sensor_msgs/JointState      measured positions, with the URDF joint names
+                                                            (k1_description): joint1..joint6 in radians and
+                                                            joint_gripper_left (finger position in metres)
+        enabled                 std_msgs/Bool               whether the motors are locked; latched
     Subscribes:
         joint_position_command  std_msgs/Float64MultiArray  6 arm joint targets in radians
         gripper_command         std_msgs/Float64            1.0 fully open, 0.0 fully closed
@@ -20,13 +23,18 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 import serial
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64, Float64MultiArray
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from std_msgs.msg import Bool, Float64, Float64MultiArray
 from std_srvs.srv import SetBool
 
-from unitree_k1_sdk.k1 import JOINT_NAMES, UnitreeK1Robot
+from unitree_k1_sdk.k1 import JOINT_NAMES, UnitreeK1Robot, gripper_finger_position
 
 
 N_ARM_JOINTS = 6        # the first 6 entries of JOINT_NAMES; the 7th is the gripper
+# joint names in k1_description's URDF, in the SDK's order
+URDF_JOINT_NAMES = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint_gripper_left"]
+# late subscribers (k1_web, a restarted script) get the last value
+LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 MAX_DURATION_MS = 32767  # the move duration is sent as a signed 16 bit integer
 
 
@@ -42,22 +50,27 @@ class K1DriverNode(Node):
         self.state_timeout_sec = self.declare_parameter("state_timeout_sec", 1.0).value
         self.enable_on_start = self.declare_parameter("enable_on_start", False).value
         self.disable_on_shutdown = self.declare_parameter("disable_on_shutdown", False).value
+        self.joint_names = list(self.declare_parameter("joint_names", URDF_JOINT_NAMES).value)
 
         if self.publish_rate_hz <= 0.0:
             raise ValueError(f"publish_rate_hz must be positive, got {self.publish_rate_hz}")
         if not 0 <= self.command_duration_ms <= MAX_DURATION_MS:
             raise ValueError(f"command_duration_ms must be in [0, {MAX_DURATION_MS}], got {self.command_duration_ms}")
+        if len(self.joint_names) != len(JOINT_NAMES):
+            raise ValueError(f"joint_names needs {len(JOINT_NAMES)} names, got {self.joint_names}")
 
         # open the serial port last, so a bad parameter never leaves the port open
         self.arm = UnitreeK1Robot(self.port, self.baudrate)
         self.arm.connect()
         self.get_logger().info(f"connected to K1 on {self.port} at {self.baudrate} baud")
 
+        self.joint_state_pub = self.create_publisher(JointState, "joint_states", 10)
+        self.enabled_pub = self.create_publisher(Bool, "enabled", LATCHED)
         if self.enable_on_start:
             self.arm.enable()
             self.get_logger().info("motors enabled")
+        self.enabled_pub.publish(Bool(data=self.arm.is_enabled))
 
-        self.joint_state_pub = self.create_publisher(JointState, "joint_states", 10)
         self.create_subscription(Float64MultiArray, "joint_position_command", self.on_joint_position_command, 10)
         self.create_subscription(Float64, "gripper_command", self.on_gripper_command, 10)
         self.create_service(SetBool, "enable", self.on_enable)
@@ -76,8 +89,10 @@ class K1DriverNode(Node):
 
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.name = list(JOINT_NAMES)
-        msg.position = self.arm.joint_position_measured.tolist()
+        msg.name = list(self.joint_names)
+        positions = self.arm.joint_position_measured.tolist()
+        positions[N_ARM_JOINTS] = gripper_finger_position(positions[N_ARM_JOINTS])
+        msg.position = positions
         self.joint_state_pub.publish(msg)
 
     def on_joint_position_command(self, msg: Float64MultiArray):
@@ -123,6 +138,7 @@ class K1DriverNode(Node):
 
         response.success = True
         response.message = "motors enabled" if request.data else "motors disabled"
+        self.enabled_pub.publish(Bool(data=self.arm.is_enabled))
         self.get_logger().info(response.message)
         return response
 

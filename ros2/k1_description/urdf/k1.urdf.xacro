@@ -1,0 +1,246 @@
+<?xml version="1.0"?>
+<!--
+  Unitree K1 robotic arm (6 DOF + parallel gripper)
+
+  The K1 is the NXROBO Sagittarius arm (model "sgr532", 532 mm reach) sold as a
+  Go1 EDU accessory. Kinematics, inertias, joint limits and meshes are taken
+  unchanged from NXROBO's sagittarius_descriptions package (BSD-3-Clause, see
+  LICENSE.NXROBO), https://github.com/NXROBO/sagittarius_ws
+
+  Changes from the original sgr532.urdf.xacro:
+    - ROS 2 layout: ROS 1 <transmission> tags removed
+    - link names take an optional prefix (default none) instead of "sgr532/"
+    - joint_gripper_right mimics joint_gripper_left (one gripper command)
+    - link_grasping_frame inertia removed (upstream had a stray 1.55 kg mass
+      at -0.29 m, which would corrupt any dynamics or Gazebo use)
+    - joint effort limits set from servo ratings instead of the 100 N·m placeholder
+    - optional fixed "world" mount frame with a configurable pose
+
+  Joint order matches the Unitree-K1-SDK driver 1:1 (radians, no sign flips):
+    joint1 shoulder_pan, joint2 shoulder_lift, joint3 elbow_flex,
+    joint4 wrist_roll,   joint5 wrist_flex,    joint6 gripper_roll
+-->
+<robot name="k1" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <xacro:arg name="prefix" default=""/>
+  <xacro:arg name="use_world_frame" default="true"/>
+  <xacro:arg name="mount_xyz" default="0 0 0"/>
+  <xacro:arg name="mount_rpy" default="0 0 0"/>
+
+  <xacro:property name="p" value="$(arg prefix)"/>
+  <xacro:property name="mesh_dir" value="package://k1_description/meshes"/>
+
+  <!--
+    Effort limits (N·m). The K1 uses 5 × 45 kg·cm and 2 × 85 kg·cm servos
+    (≈ 4.4 and 8.3 N·m). Which joints carry the 85 kg·cm servos is not
+    documented; shoulder lift and elbow (the most loaded joints) are assumed.
+    Verify before relying on these for dynamics.
+  -->
+  <xacro:property name="effort_small" value="4.4"/>
+  <xacro:property name="effort_large" value="8.3"/>
+  <!-- Upstream velocity limit (rad/s), kept as published -->
+  <xacro:property name="vel" value="3.14"/>
+
+  <xacro:macro name="mesh_link" params="name mesh rgba *inertial">
+    <link name="${p}${name}">
+      <xacro:insert_block name="inertial"/>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><mesh filename="${mesh_dir}/${mesh}"/></geometry>
+        <material name="${name}_material"><color rgba="${rgba}"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><mesh filename="${mesh_dir}/${mesh}"/></geometry>
+      </collision>
+    </link>
+  </xacro:macro>
+
+  <xacro:property name="white" value="1 1 1 1"/>
+  <xacro:property name="grey" value="0.753 0.753 0.753 1"/>
+
+  <!-- Optional mount frame: set mount_xyz / mount_rpy to the arm's pose on the bench plate -->
+  <xacro:if value="$(arg use_world_frame)">
+    <link name="world"/>
+    <joint name="${p}world_to_base" type="fixed">
+      <origin xyz="$(arg mount_xyz)" rpy="$(arg mount_rpy)"/>
+      <parent link="world"/>
+      <child link="${p}base_link"/>
+    </joint>
+  </xacro:if>
+
+  <!-- ===================== Links (geometry from NXROBO sgr532) ===================== -->
+
+  <xacro:mesh_link name="base_link" mesh="sagittarius_base_link.STL" rgba="${white}">
+    <inertial>
+      <origin xyz="0.00793179544277737 0 0.0312047945759253" rpy="0 0 0"/>
+      <mass value="0.940146705073746"/>
+      <inertia ixx="0.000950195835062344" ixy="0" ixz="-0.000200082473207336"
+               iyy="0.00267650790326047" iyz="0" izz="0.002902663900239"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link1" mesh="link1.STL" rgba="${white}">
+    <inertial>
+      <origin xyz="0 0 0.0344870497564283" rpy="0 0 0"/>
+      <mass value="0.123745079127031"/>
+      <inertia ixx="8.15779591743416E-05" ixy="0" ixz="0"
+               iyy="6.7607001964135E-05" iyz="0" izz="4.41297902395382E-05"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link2" mesh="link2.STL" rgba="${grey}">
+    <inertial>
+      <origin xyz="0.0119015312584793 0 0.150755903867182" rpy="0 0 0"/>
+      <mass value="0.156160822791157"/>
+      <inertia ixx="0.000429266751802994" ixy="0" ixz="-5.58862834004722E-05"
+               iyy="0.000444676097748043" iyz="0" izz="7.916162292894E-05"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link3" mesh="link3.STL" rgba="${grey}">
+    <inertial>
+      <origin xyz="0.054357321065004 0 0.00064594073830132" rpy="0 0 0"/>
+      <mass value="0.0366487313200473"/>
+      <inertia ixx="9.28701176876329E-06" ixy="0" ixz="6.34310578103811E-07"
+               iyy="2.0727596617309E-05" iyz="0" izz="2.42416271089979E-05"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link4" mesh="link4.STL" rgba="${grey}">
+    <inertial>
+      <origin xyz="0.0444029485674779 -0.00527865310158246 0" rpy="0 0 0"/>
+      <mass value="0.124950088011432"/>
+      <inertia ixx="3.52699895078887E-05" ixy="-1.14870103744551E-05" ixz="0"
+               iyy="0.00010928557067047" iyz="0" izz="0.000121451732690361"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link5" mesh="link5.STL" rgba="${grey}">
+    <inertial>
+      <origin xyz="0.0391172635125616 0 0.011359922796391" rpy="0 0 0"/>
+      <mass value="0.0564710099602834"/>
+      <inertia ixx="1.77667699918498E-05" ixy="0" ixz="-6.79618041712231E-07"
+               iyy="1.89643063051294E-05" iyz="0" izz="1.66130972969903E-05"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link6" mesh="link6.STL" rgba="${grey}">
+    <inertial>
+      <origin xyz="0.0330748503556987 0 0.00874151659437283" rpy="0 0 0"/>
+      <mass value="0.0790875358325134"/>
+      <inertia ixx="4.00727396068743E-05" ixy="0" ixz="6.77337873337555E-06"
+               iyy="4.37063090227749E-05" iyz="0" izz="5.69755186998711E-05"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link_gripper_left" mesh="link_gripper_left.STL" rgba="${grey}">
+    <inertial>
+      <origin xyz="0.0168448613850675 0.00562743947549268 -3.34157867051821E-05" rpy="0 0 0"/>
+      <mass value="0.0185082696416839"/>
+      <inertia ixx="1.65620668352765E-06" ixy="3.12039082733024E-07" ixz="-1.06123823321138E-09"
+               iyy="7.56731403094351E-06" iyz="5.54920898904154E-11" izz="6.37610666327876E-06"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <xacro:mesh_link name="link_gripper_right" mesh="link_gripper_right.STL" rgba="${grey}">
+    <inertial>
+      <origin xyz="0.0168448612901284 -0.00562743946967042 3.34158424380449E-05" rpy="0 0 0"/>
+      <mass value="0.0185082695670405"/>
+      <inertia ixx="1.65620670013429E-06" ixy="-3.12039085367371E-07" ixz="1.06121397059487E-09"
+               iyy="7.56731399585561E-06" iyz="5.54960746810554E-11" izz="6.37610660879392E-06"/>
+    </inertial>
+  </xacro:mesh_link>
+
+  <!-- Frames without bodies -->
+  <link name="${p}link_grasping_frame"/>  <!-- tool centre point between the fingers -->
+  <link name="${p}ar_tag_link"/>
+  <link name="${p}usb_cam_link"/>
+
+  <!-- ===================== Joints (limits from NXROBO sgr532) ===================== -->
+
+  <joint name="${p}joint1" type="revolute">       <!-- shoulder_pan -->
+    <origin xyz="0.045 0 0.07" rpy="0 0 0"/>
+    <parent link="${p}base_link"/>
+    <child link="${p}link1"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-2.0" upper="2.0" effort="${effort_small}" velocity="${vel}"/>
+  </joint>
+
+  <joint name="${p}joint2" type="revolute">       <!-- shoulder_lift -->
+    <origin xyz="0 -0.0001 0.055" rpy="0 0 0"/>
+    <parent link="${p}link1"/>
+    <child link="${p}link2"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-1.57" upper="1.4" effort="${effort_large}" velocity="${vel}"/>
+  </joint>
+
+  <joint name="${p}joint3" type="revolute">       <!-- elbow_flex -->
+    <origin xyz="0.033 -0.0001 0.179" rpy="0 0 0"/>
+    <parent link="${p}link2"/>
+    <child link="${p}link3"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-1.48" upper="1.8" effort="${effort_large}" velocity="${vel}"/>
+  </joint>
+
+  <joint name="${p}joint4" type="revolute">       <!-- wrist_roll -->
+    <origin xyz="0.0845 0 0" rpy="0 0 0"/>
+    <parent link="${p}link3"/>
+    <child link="${p}link4"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="-2.9" upper="2.9" effort="${effort_small}" velocity="${vel}"/>
+  </joint>
+
+  <joint name="${p}joint5" type="revolute">       <!-- wrist_flex -->
+    <origin xyz="0.08435 0.00065 0" rpy="0 0 0"/>
+    <parent link="${p}link4"/>
+    <child link="${p}link5"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-1.8" upper="1.6" effort="${effort_small}" velocity="${vel}"/>
+  </joint>
+
+  <joint name="${p}joint6" type="revolute">       <!-- gripper_roll -->
+    <origin xyz="0.061387 0 0" rpy="0 0 0"/>
+    <parent link="${p}link5"/>
+    <child link="${p}link6"/>
+    <axis xyz="-1 0 0"/>
+    <limit lower="-3.1" upper="3.1" effort="${effort_small}" velocity="${vel}"/>
+  </joint>
+
+  <!-- Fingers: 0 m = open, -0.034 m = closed (per finger) -->
+  <joint name="${p}joint_gripper_left" type="prismatic">
+    <origin xyz="0.0695 0.033 0" rpy="0 0 0"/>
+    <parent link="${p}link6"/>
+    <child link="${p}link_gripper_left"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.034" upper="0" effort="10" velocity="1.14"/>
+  </joint>
+
+  <joint name="${p}joint_gripper_right" type="prismatic">
+    <origin xyz="0.0695 -0.033 0" rpy="0 0 0"/>
+    <parent link="${p}link6"/>
+    <child link="${p}link_gripper_right"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.034" upper="0" effort="10" velocity="1.14"/>
+    <mimic joint="${p}joint_gripper_left" multiplier="1" offset="0"/>
+  </joint>
+
+  <joint name="${p}joint_grasping_frame" type="fixed">
+    <origin xyz="0.0557 0 0" rpy="0 0 0"/>
+    <parent link="${p}link6"/>
+    <child link="${p}link_grasping_frame"/>
+  </joint>
+
+  <joint name="${p}joint_ar_tag_frame" type="fixed">
+    <origin xyz="-0.018 0 0.036" rpy="0 0 0"/>
+    <parent link="${p}link6"/>
+    <child link="${p}ar_tag_link"/>
+  </joint>
+
+  <joint name="${p}joint_usb_cam_frame" type="fixed">
+    <origin xyz="0.05 0 0.05825" rpy="-1.57 0 -1.57"/>
+    <parent link="${p}link6"/>
+    <child link="${p}usb_cam_link"/>
+  </joint>
+
+</robot>

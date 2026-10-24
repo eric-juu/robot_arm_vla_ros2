@@ -7,3 +7,5 @@ k1_driver:
     state_timeout_sec: 1.0      # stop publishing joint_states if the arm has been silent this long, 0 disables the check
     enable_on_start: false      # lock the motors when the node starts
     disable_on_shutdown: false  # release the motors when the node stops (WARNING: the arm collapses)
+    # names published on joint_states, in the SDK's order; the defaults match k1_description's URDF
+    joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint_gripper_left]

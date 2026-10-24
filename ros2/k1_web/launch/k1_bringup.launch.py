@@ -1,9 +1,11 @@
 """
-Starts everything for remote control: the arm driver (or a mock), the wrist camera and the web interface.
+Starts everything: the arm driver (or a mock), robot_state_publisher with the K1's URDF (TF), the wrist camera,
+the web interface (which also serves the trajectory and gripper actions) and optionally RViz.
 
     ros2 launch k1_web k1_bringup.launch.py port:=/dev/ttyACM0
     ros2 launch k1_web k1_bringup.launch.py mock:=true use_camera:=false    # no hardware
     ros2 launch k1_web k1_bringup.launch.py tunnel:=true                    # also print a public https link
+    ros2 launch k1_web k1_bringup.launch.py rviz:=true                      # 3D view of the arm (needs a display)
 
 The web node needs K1_WEB_TOKEN in the environment.
 """
@@ -14,13 +16,20 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
     share = get_package_share_directory("k1_web")
     driver_launch = os.path.join(get_package_share_directory("k1_driver_py"), "launch", "k1_driver.launch.py")
+    description = get_package_share_directory("k1_description")
+    robot_description = ParameterValue(
+        Command(["xacro ", os.path.join(description, "urdf", "k1.urdf.xacro"),
+                 " mount_xyz:='", LaunchConfiguration("mount_xyz"), "'",
+                 " mount_rpy:='", LaunchConfiguration("mount_rpy"), "'"]),
+        value_type=str)
 
     return LaunchDescription([
         DeclareLaunchArgument("port", default_value="/dev/ttyACM0", description="serial port the arm is connected to"),
@@ -30,6 +39,11 @@ def generate_launch_description():
         DeclareLaunchArgument("tunnel", default_value="false",
                               description="expose the page through a Cloudflare quick tunnel (needs cloudflared)"),
         DeclareLaunchArgument("web_port", default_value="8080", description="port the web server listens on"),
+        DeclareLaunchArgument("rviz", default_value="false", description="open RViz with the arm model"),
+        DeclareLaunchArgument("mount_xyz", default_value="0 0 0",
+                              description="arm base position in the world frame, metres"),
+        DeclareLaunchArgument("mount_rpy", default_value="0 0 0",
+                              description="arm base orientation in the world frame, radians"),
         DeclareLaunchArgument("web_params_file", default_value=os.path.join(share, "config", "k1_web.yaml")),
         DeclareLaunchArgument("camera_params_file", default_value=os.path.join(share, "config", "camera.yaml")),
 
@@ -41,6 +55,15 @@ def generate_launch_description():
         Node(
             package="k1_web", executable="mock_arm", name="mock_arm", output="screen",
             condition=IfCondition(LaunchConfiguration("mock")),
+        ),
+        Node(
+            package="robot_state_publisher", executable="robot_state_publisher", name="robot_state_publisher",
+            parameters=[{"robot_description": robot_description}],
+        ),
+        Node(
+            package="rviz2", executable="rviz2", name="rviz2",
+            arguments=["-d", os.path.join(description, "rviz", "k1.rviz")],
+            condition=IfCondition(LaunchConfiguration("rviz")),
         ),
         Node(
             package="v4l2_camera", executable="v4l2_camera_node", name="camera", output="screen",

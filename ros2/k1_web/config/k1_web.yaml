@@ -7,6 +7,8 @@ k1_web:
     max_joint_velocity: 0.5     # rad/s, applied to every joint
     # per joint limits in radians, order: shoulder_pan, shoulder_lift, elbow_flex, wrist_roll, wrist_flex, gripper_roll
     # conservative placeholders, measure and widen them on the real arm. Write them as floats (1.0, not 1).
+    # The URDF's (NXROBO's) hardware ranges are the outer bound: min [-2.0, -1.57, -1.48, -2.9, -1.8, -3.1],
+    # max [2.0, 1.4, 1.8, 2.9, 1.6, 3.1].
     joint_limits_min: [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
     joint_limits_max: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
     state_timeout_sec: 0.5      # stop driving the arm if joint_states is older than this
@@ -15,4 +17,10 @@ k1_web:
     image_topic: /image_raw/compressed
     poses_file: ""                          # "" = config/poses.yaml in this package
     user_poses_file: ~/.k1_web/poses.yaml   # where "save pose" writes, "" disables saving
+    # FollowJointTrajectory / GripperCommand actions (arm_controller/..., gripper_controller/...)
+    goal_tolerance_rad: 0.05    # how close the measured pose must get for a trajectory to succeed (per joint)
+    settle_timeout_sec: 3.0     # extra time allowed after a trajectory ends, on top of the speed-limited travel time
+    ready_timeout_sec: 1.0      # how long a goal waits for a just-enabled arm to report its pose
+    gripper_settle_sec: 1.0     # how long a gripper goal waits for the fingers
+    gripper_tolerance_m: 0.004  # finger error below which the gripper counts as reached (otherwise "stalled")
     secure_cookie: false        # cookies are already https-only through the tunnel; true forces it for every request

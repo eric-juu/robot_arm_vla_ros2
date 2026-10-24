@@ -4,15 +4,18 @@ A web page for controlling the K1 arm remotely, with the wrist camera's live fee
 
 ```
 Browser ──https──> Cloudflare ──tunnel──> Linux PC
-                                          ├─ tunnel      (cloudflared, started with tunnel:=true)
-                                          ├─ k1_driver   (k1_driver_py, unchanged)
-                                          ├─ camera      (v4l2_camera) → /image_raw, /image_raw/compressed
-                                          └─ k1_web      web server + ROS node, on 127.0.0.1:8080
+                                          ├─ tunnel        (cloudflared, started with tunnel:=true)
+                                          ├─ k1_driver     (k1_driver_py) serial ↔ /joint_states, /enabled, commands
+                                          ├─ robot_state_publisher  URDF (k1_description) → /tf, /robot_description
+                                          ├─ camera        (v4l2_camera) → /image_raw, /image_raw/compressed
+                                          ├─ k1_web        web server + ROS node, on 127.0.0.1:8080, and the
+                                          │                trajectory / gripper actions for ROS clients
+                                          └─ rviz2         (optional, rviz:=true)
 ```
 
 `cloudflared` makes an outgoing connection to Cloudflare, so the PC needs no open ports or router changes.
 
-The browser only ever sends *goals*. The `k1_web` node enforces safety on the server side:
+The browser, the agent and ROS clients only ever send *goals*. The `k1_web` node enforces safety on the server side, for all of them:
 
 - **Joint limits:** every goal is clamped to `joint_limits_min/max`.
 - **Smoothing:** the commanded pose moves toward the goal at no more than `max_joint_velocity` and is sent to the driver at `control_rate_hz`. Keep the driver's `command_duration_ms` at `0`.
@@ -55,6 +58,8 @@ Launch arguments (`--show-args` lists them):
 | `video_device` | `/dev/video0` | camera device |
 | `tunnel` | `false` | start a Cloudflare quick tunnel and print its public link |
 | `web_port` | `8080` | port of the web server (and the tunnel's target) |
+| `rviz` | `false` | open RViz with the live arm model (needs a desktop session) |
+| `mount_xyz` / `mount_rpy` | `0 0 0` | where the arm's base sits in the `world` frame (metres / radians) |
 | `web_params_file` | `config/k1_web.yaml` | |
 | `camera_params_file` | `config/camera.yaml` | |
 
@@ -67,6 +72,12 @@ Launch arguments (`--show-args` lists them):
 5. **Disable motors** asks for confirmation, because the arm goes limp.
 
 ### First run on the real arm
+
+Check the arm model against the real arm once (`rviz:=true`):
+1. **Zero pose:** at all zeros, the upper arm should be vertical and the forearm horizontal, pointing forward.
+2. **Directions:** move each joint +0.2 rad from the page. The RViz model must turn the same way.
+
+If either is off, the URDF needs offsets or sign flips before you trust TF or any Cartesian math.
 
 The default limits (±1.0 rad on every joint) are placeholders. With someone standing at the arm, move each joint slowly to find its safe range. Write the ranges into `config/k1_web.yaml` as floats, then rebuild, or pass your own copy with `web_params_file:=`. Save a `home` pose from the UI.
 
@@ -130,6 +141,39 @@ journalctl --user -u k1.service | grep -o 'https://[a-z0-9-]*\.trycloudflare\.co
 
 The motors stay disabled at startup unless `enable_on_start` is set for the driver.
 
+## ROS 2 interface
+
+`k1_web` serves the standard ROS motion interfaces, under the names ros2_control would use, so MoveIt and other ROS tools can drive the arm. Every goal becomes a k1_web goal, with the same joint limits, speed limit, stale-state check and STOP as the page.
+
+| Name | Type | Notes |
+|---|---|---|
+| `arm_controller/follow_joint_trajectory` | `control_msgs/action/FollowJointTrajectory` | Joint names `joint1` … `joint6`, or the SDK's names. Joints you leave out hold still. Waypoints are interpolated linearly. |
+| `gripper_controller/gripper_cmd` | `control_msgs/action/GripperCommand` | `position` is the finger position in metres, as in the URDF: 0 open, about −0.036 closed. Fingers that stop early on an object finish with `stalled: true`. |
+| `/tf`, `/robot_description` | | from `robot_state_publisher` and the URDF, with frames such as `world`, `base_link`, `link_grasping_frame` (between the fingers) and `usb_cam_link` |
+| `enabled` | `std_msgs/Bool` (latched) | the driver's motor state. The page follows it, even when someone calls `/enable` from ROS |
+
+A trajectory goal is refused (`INVALID_GOAL`, with the reason in `error_string`) in these cases:
+- the motors are off;
+- a waypoint is outside the limits;
+- the trajectory names an unknown joint.
+
+It aborts in these cases:
+- someone presses STOP, sends a goal from the page, or disables the motors;
+- a newer trajectory arrives;
+- the arm doesn't reach the goal within `goal_tolerance_rad`. The arm gets the trajectory's time, plus the travel the speed limit allows, plus `settle_timeout_sec`.
+
+While a goal runs it counts as a connected client for the deadman.
+
+```bash
+ros2 run k1_examples move joint1=0.3 --time 2     # see the k1_examples package
+ros2 action send_goal /arm_controller/follow_joint_trajectory control_msgs/action/FollowJointTrajectory \
+  "{trajectory: {joint_names: [joint1], points: [{positions: [0.3], time_from_start: {sec: 2}}]}}"
+ros2 action send_goal /gripper_controller/gripper_cmd control_msgs/action/GripperCommand "{command: {position: 0.0}}"
+ros2 run tf2_ros tf2_echo world link_grasping_frame                # where the fingertips are
+```
+
+The action settings (`goal_tolerance_rad`, `settle_timeout_sec`, `ready_timeout_sec`, `gripper_settle_sec`, `gripper_tolerance_m`) are in `config/k1_web.yaml`.
+
 ## API (for scripts and the future agent)
 
 Authenticate with the session cookie or an `Authorization: Bearer <token>` header.
@@ -159,7 +203,11 @@ Messages you can send on `/ws`. Any message also counts as a heartbeat; send at 
 Add `"id": <any>` to a message to get exactly one reply carrying that id: `ack`, `error`, `enable_result` or `info`.
 
 The server pushes these messages:
-- `{"type":"state", names, positions, stale, enabled, ready, goal, commanded, gripper, limits_min, limits_max, poses, clients, agent}` at `state_rate_hz`. `clients` counts connections by role; `agent` is the agent service's status, or null.
+- `{"type":"state", names, positions, stale, enabled, ready, goal, commanded, gripper, limits_min, limits_max, poses, clients, agent}` at `state_rate_hz`.
+  - `names` are always the SDK's names (`shoulder_pan` … `gripper_roll`, then `gripper`), whatever names `joint_states` uses.
+  - The last entry of `positions` is the measured finger position in metres.
+  - `clients` counts connections by role.
+  - `agent` is the agent service's status, or null.
 - `{"type":"error","message":...}` when a command is rejected.
 - `{"type":"event","name":"stop","by":role}` to everyone when someone presses STOP. The agent aborts its task when a human does.
 
