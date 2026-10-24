@@ -31,6 +31,10 @@ MSG_END = b"\x7D"
 GRIPPER_CLOSE_VALUE: int = 1250
 GRIPPER_OPEN_VALUE: int = 0
 
+# finger travel per raw gripper unit, from NXROBO's Sagittarius driver (finger metres = -raw * 0.026 / 900).
+# 0 m is open and negative is closed, as in the URDF (k1_description). Not yet calibrated on the K1.
+GRIPPER_METRES_PER_RAW = 0.026 / 900
+
 # JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_roll", "wrist_flex", "gripper_roll", "gripper_open"]
 JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_roll", "wrist_flex", "gripper_roll", "gripper"]
 
@@ -41,6 +45,30 @@ ZERO_POSE = np.array([
 IDLE_POSE = np.array([
     0, 0, 0, 0.0, 0.0, 0.0, 0
 ])
+
+
+def gripper_finger_position(gripper_rad: float) -> float:
+    """
+    Converts the gripper value in joint_position_measured to the finger position in metres (0 open, negative closed).
+
+    The arm reports the gripper servo like the other joints (raw / 1800 * pi), so undo that first.
+    """
+    raw = gripper_rad * 1800.0 / math.pi
+    return -raw * GRIPPER_METRES_PER_RAW
+
+
+def gripper_open_fraction(finger_m: float) -> float:
+    """Converts a finger position in metres to the set_gripper() value: 1.0 open, 0.0 closed."""
+    raw = -finger_m / GRIPPER_METRES_PER_RAW
+    value = 1.0 - (raw - GRIPPER_OPEN_VALUE) / (GRIPPER_CLOSE_VALUE - GRIPPER_OPEN_VALUE)
+    return min(max(value, 0.0), 1.0)
+
+
+def gripper_finger_target(open_fraction: float) -> float:
+    """Converts a set_gripper() value (1.0 open, 0.0 closed) to the finger position in metres it commands."""
+    raw = GRIPPER_OPEN_VALUE + (1.0 - open_fraction) * (GRIPPER_CLOSE_VALUE - GRIPPER_OPEN_VALUE)
+    return -raw * GRIPPER_METRES_PER_RAW
+
 
 class Message:
     TYPE_REQUEST_MESSAGE        = 0x01
@@ -291,7 +319,7 @@ class UnitreeK1Robot:
             rad (float): The gripper open angle in radians. 0 rad is fully open, 2.0944 rad (120 deg) is fully closed.
         """
         value = rad / 2.0944
-        self.set_gripper(1.0 - rad)
+        self.set_gripper(1.0 - value)
     
 
     def _send_arm_all_server_time(self, difftime: int, v1: float, v2: float, v3: float, v4: float, v5: float, v6: float):

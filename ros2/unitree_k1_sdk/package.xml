@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>unitree_k1_sdk</name>
+  <version>2024.11.1</version>
+  <description>Serial driver library for the Unitree K1 (Sagittarius) arm. Plain Python, no ROS imports.</description>
+  <maintainer email="jason.tang@berkeley.edu">Jason Tang</maintainer>
+  <license>MIT</license>
+  <url type="repository">https://github.com/T-K-233/Unitree-K1-SDK</url>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-tqdm</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
