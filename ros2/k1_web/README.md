@@ -91,6 +91,8 @@ ros2 bag record /image_raw/compressed /joint_states /joint_position_command /gri
 
 To check the camera: `v4l2-ctl --list-devices`, then `ros2 topic hz /image_raw/compressed`. Device, resolution and JPEG quality are set in `config/camera.yaml`.
 
+The wrist camera is mounted upside down, so `k1_web` turns its frames 180° for the page, `/snapshot.jpg` and the agent (`camera_rotate_180` in `config/k1_web.yaml`; set it to `false` if the image ends up upside down). The ROS topics, and anything you record from them, stay as the camera sends them.
+
 ## Remote access
 
 ### Cloudflare quick tunnel (current setup)

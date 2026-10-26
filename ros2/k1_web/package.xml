@@ -25,6 +25,7 @@
   <exec_depend>python3-uvicorn</exec_depend>
   <exec_depend>python3-websockets</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
   <!-- the camera is optional at runtime (use_camera:=false), so these are not hard dependencies:
        ros-${ROS_DISTRO}-v4l2-camera ros-${ROS_DISTRO}-image-transport-plugins -->
 

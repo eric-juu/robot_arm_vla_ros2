@@ -43,6 +43,7 @@ from std_srvs.srv import SetBool
 import uvicorn
 
 from k1_web.control import N_ARM_JOINTS, URDF_JOINT_NAMES, ArmController, CommandError
+from k1_web.image import rotate_jpeg_180
 from k1_web.poses import PoseStore
 from k1_web.server import WebConfig, create_app
 from k1_web.trajectory import Trajectory, outside_limits, tolerances, within
@@ -75,6 +76,7 @@ class K1WebNode(Node):
         deadman_timeout_sec = self.declare_parameter("deadman_timeout_sec", 1.0).value
         self.video_max_fps = self.declare_parameter("video_max_fps", 15.0).value
         image_topic = self.declare_parameter("image_topic", "/image_raw/compressed").value
+        self.rotate_camera = self.declare_parameter("camera_rotate_180", True).value
         poses_file = self.declare_parameter("poses_file", "").value or os.path.join(share, "config", "poses.yaml")
         user_poses_file = self.declare_parameter("user_poses_file", "~/.k1_web/poses.yaml").value
         self.secure_cookie = self.declare_parameter("secure_cookie", False).value
@@ -133,7 +135,14 @@ class K1WebNode(Node):
                 self.get_logger().warning(f"ignoring camera frames in format {msg.format!r}, need JPEG")
                 self._warned_image_format = True
             return
-        self.controller.on_image(bytes(msg.data))
+        jpeg = bytes(msg.data)
+        if self.rotate_camera:
+            try:
+                jpeg = rotate_jpeg_180(jpeg)
+            except Exception as e:      # a corrupt frame: skip it rather than show it the wrong way up
+                self.get_logger().warning(f"could not rotate a camera frame: {e}", throttle_duration_sec=5.0)
+                return
+        self.controller.on_image(jpeg)
 
     def on_control_timer(self):
         arm, gripper = self.controller.tick(1.0 / self.control_rate_hz)

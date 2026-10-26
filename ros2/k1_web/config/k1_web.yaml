@@ -15,6 +15,7 @@ k1_web:
     deadman_timeout_sec: 1.0    # hold position if no client message arrives for this long
     video_max_fps: 15.0
     image_topic: /image_raw/compressed
+    camera_rotate_180: true     # the wrist camera is mounted upside down; turns the page's view and /snapshot.jpg upright
     poses_file: ""                          # "" = config/poses.yaml in this package
     user_poses_file: ~/.k1_web/poses.yaml   # where "save pose" writes, "" disables saving
     # FollowJointTrajectory / GripperCommand actions (arm_controller/..., gripper_controller/...)

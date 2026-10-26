@@ -78,7 +78,7 @@ The `python3-*` web packages are in Ubuntu's **universe** repository, so enable 
 sudo add-apt-repository universe
 sudo apt update
 sudo apt install python3-serial python3-numpy python3-tqdm \
-                 python3-fastapi python3-uvicorn python3-websockets python3-yaml \
+                 python3-fastapi python3-uvicorn python3-websockets python3-yaml python3-pil \
                  ros-jazzy-v4l2-camera ros-jazzy-image-transport-plugins v4l-utils \
                  ros-jazzy-xacro ros-jazzy-robot-state-publisher ros-jazzy-control-msgs \
                  ros-jazzy-rviz2 ros-jazzy-joint-state-publisher-gui
