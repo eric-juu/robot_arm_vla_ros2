@@ -164,6 +164,8 @@ cython_debug/
 agent/runs/
 agent/frame.jpg
 agent/skills/pending/
+# k1-agent eval results (traces and rows); copy a report out if you want to keep it
+agent/evals/results/
 
 # local Claude Code plans (not shared)
 .claude/plans/

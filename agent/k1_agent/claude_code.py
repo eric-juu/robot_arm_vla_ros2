@@ -22,6 +22,7 @@ import threading
 import time
 
 from k1_agent.client import K1Client
+from k1_agent.providers.base import Usage
 from k1_agent.runner import RunResult
 from k1_agent.trace import Trace
 
@@ -102,6 +103,9 @@ class ClaudeCodeRunner:
         self.use_api_key = use_api_key
         self.max_budget_usd = max_budget_usd
         self.timeout = timeout
+        self.usage: Usage | None = None
+        self.cost_usd: float | None = None      # Claude Code's own estimate, at API prices
+        self.turns = 0
 
     def mcp_config(self) -> str:
         args = ["-m", "k1_agent.cli", "--url", self.url]
@@ -155,8 +159,14 @@ class ClaudeCodeRunner:
                     if name != "note":
                         self.note(f"-> {name}({json.dumps(block.get('input'))[:200]})")
         elif kind == "result":
+            usage = event.get("usage") or {}
+            self.usage = Usage(input=usage.get("input_tokens") or 0, output=usage.get("output_tokens") or 0,
+                               cache_read=usage.get("cache_read_input_tokens") or 0,
+                               cache_write=usage.get("cache_creation_input_tokens") or 0)
+            self.cost_usd = event.get("total_cost_usd")
+            self.turns = event.get("num_turns") or 0
             self.trace.log("claude_code_result", subtype=event.get("subtype"), is_error=event.get("is_error"),
-                           cost_usd=event.get("total_cost_usd"), turns=event.get("num_turns"))
+                           cost_usd=self.cost_usd, turns=self.turns, usage=self.usage.as_dict())
             return event.get("result") or ""
         return None
 
@@ -201,6 +211,9 @@ class ClaudeCodeRunner:
         else:
             success, summary = parse_result(final)
             result = RunResult(success, summary, "done", self.trace.dir)
-        self.trace.log("outcome", success=result.success, summary=result.summary, reason=result.reason)
+        result.usage, result.cost_usd, result.llm_calls = self.usage, self.cost_usd, self.turns
+        self.trace.log("outcome", success=result.success, summary=result.summary, reason=result.reason,
+                       usage=self.usage.as_dict() if self.usage else None, cost_usd=self.cost_usd,
+                       llm_calls=self.turns)
         self.note(f"{'SUCCESS' if result.success else 'FAILED'} ({result.reason}): {result.summary[:200]}")
         return result

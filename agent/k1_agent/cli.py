@@ -7,20 +7,23 @@ k1-agent command line.
     k1-agent mcp --allow-motion                        MCP server for Claude Code / Codex
     k1-agent login [--status]                          sign in to Claude Code (for --provider claude-code)
     k1-agent serve --allow-motion                      take tasks from the web page's prompt box
+    k1-agent eval run|perception|label|report ...      compare models: success rate against cost
 
-The k1_web token comes from K1_WEB_TOKEN (or K1_WEB_ADMIN_PASSWORD); API keys from ANTHROPIC_API_KEY
-or OPENAI_API_KEY. The claude-code provider needs no key: it uses the Claude account Claude Code is
-signed in with.
+The k1_web token comes from K1_WEB_TOKEN (or K1_WEB_ADMIN_PASSWORD); API keys from ANTHROPIC_API_KEY,
+OPENAI_API_KEY or GEMINI_API_KEY. The claude-code provider needs no key: it uses the Claude account
+Claude Code is signed in with.
 """
 import argparse
 import json
 import os
 import sys
+import time
 
 import yaml
 
 from k1_agent.claude_code import ClaudeCodeError
 from k1_agent.client import K1Client, K1Error
+from k1_agent.evaluate import EvalError
 from k1_agent.primitives import Primitives
 from k1_agent.skills import SkillLibrary
 from k1_agent.trace import Trace
@@ -47,7 +50,7 @@ def add_safety_args(p: argparse.ArgumentParser):
 
 
 def add_provider_args(p: argparse.ArgumentParser):
-    p.add_argument("--provider", choices=["anthropic", "openai", "claude-code"])
+    p.add_argument("--provider", choices=["anthropic", "openai", "gemini", "claude-code"])
     p.add_argument("--model")
 
 
@@ -101,6 +104,7 @@ def build_task_runner(config, args, client, log=print):
 
         return run_task, {"provider": "claude-code", "model": model or "default", "allow_motion": args.allow_motion}
 
+    from k1_agent.pricing import Pricing
     from k1_agent.providers.base import make_provider
     from k1_agent.runner import AgentRunner
 
@@ -109,13 +113,14 @@ def build_task_runner(config, args, client, log=print):
     if provider_name == "openai" and config.get("openai_reasoning_effort"):
         kwargs["reasoning_effort"] = config["openai_reasoning_effort"]
     provider = make_provider(provider_name, model, **kwargs)
+    pricing = Pricing.load()
 
     def run_task(text, mode, operator):
         trace = Trace(config["runs_dir"], text)
         prims = make_prims(config, args, client, trace)
         runner = AgentRunner(provider, prims, skills, trace, operator, max_turns=config["max_turns"],
                              image_history=config["image_history"], max_tokens=config["max_tokens"],
-                             program_timeout=config["program_timeout"])
+                             program_timeout=config["program_timeout"], pricing=pricing)
         log(f"running {mode} mode with {provider_name}:{model}; trace in {trace.dir}")
         if mode == "code":
             result = runner.run_code(text, attempts=args.attempts or config["attempts"])
@@ -141,6 +146,8 @@ def cmd_run(config, args):
             print("note: Claude Code's questions appear on the web page")
         result = run_task(args.task, args.mode or config["mode"], ConsoleOperator())
         print(f"\n{'SUCCESS' if result.success else 'FAILED'} ({result.reason}): {result.summary}")
+        if result.cost_usd is not None:
+            print(f"cost: ${result.cost_usd:.4f} over {result.llm_calls} model calls")
         print(f"trace: {result.trace_dir}")
     return 0 if result.success else 1
 
@@ -212,6 +219,83 @@ def cmd_mcp(config, args):
         client.close()
 
 
+def cmd_eval(config, args):
+    from k1_agent import evaluate as ev
+
+    if args.eval_command == "run":
+        tasks = [t for t in ev.load_suite(args.suite) if t["tier"] == args.tier and
+                 (not args.tasks or t["id"] in args.tasks.split(","))]
+        if not tasks:
+            raise ev.EvalError(f"no tier {args.tier} tasks matched in {args.suite}")
+        name = f"{os.path.splitext(os.path.basename(args.suite))[0]}-tier{args.tier}-{time.strftime('%Y%m%d-%H%M%S')}"
+        out = args.resume or args.out or os.path.join(AGENT_DIR, "evals", "results", name)
+        ev.run_suite(config, tasks, ev.parse_models(args.models), out, trials=args.trials,
+                     modes=args.modes.split(",") if args.modes else None, parallel=args.parallel,
+                     skills_on=not args.no_skills, max_cost_usd=args.max_cost_usd, url=args.url, seed=args.seed)
+        print(f"results in {out}; summary: k1-agent eval report {out}")
+    elif args.eval_command == "perception":
+        name = f"perception-{time.strftime('%Y%m%d-%H%M%S')}"
+        out = args.out or os.path.join(AGENT_DIR, "evals", "results", name)
+        ev.run_perception(config, args.dataset, ev.parse_models(args.models), out, repeats=args.repeats,
+                          parallel=args.parallel, max_cost_usd=args.max_cost_usd)
+        print(f"results in {out}; summary: k1-agent eval report {out}")
+    elif args.eval_command == "label":
+        ev.label_frames(args.runs, args.out, rotate=args.rotate_180, question=args.question,
+                        choices=args.choices.split(",") if args.choices else None, category=args.category,
+                        limit=args.limit, auto=not args.no_auto)
+    elif args.eval_command == "report":
+        rows = ev.load_rows(args.results)
+        trials, perception = ev.summarize_trials(rows), ev.summarize_perception(rows)
+        print(ev.report_markdown(trials, perception))
+        if args.html:
+            with open(args.html, "w", encoding="utf-8") as f:
+                f.write(ev.report_html(trials, perception))
+            print(f"\nwrote {args.html}")
+    return 0
+
+
+def add_eval_args(sub):
+    p = sub.add_parser("eval", help="compare models: success rate against cost (ASPIRE-style)")
+    ev_sub = p.add_subparsers(dest="eval_command", required=True)
+
+    q = ev_sub.add_parser("run", help="run a task suite: tier 1 in the simulator, tier 2 on the real arm (--url)")
+    q.add_argument("suite", nargs="?", default=os.path.join(AGENT_DIR, "evals", "tasks.yaml"))
+    q.add_argument("--models", required=True,
+                   help="comma-separated, e.g. claude-haiku-5-5,openai:gpt-5.5@high,gemini-4-argon,claude-code:sonnet")
+    q.add_argument("--tier", type=int, choices=[1, 2], default=1)
+    q.add_argument("--tasks", help="only these task ids (comma-separated)")
+    q.add_argument("--modes", help="tools,code (default: each task's first mode)")
+    q.add_argument("--trials", type=int, default=1)
+    q.add_argument("--parallel", type=int, default=1, help="simulated arms run side by side (tier 1)")
+    q.add_argument("--max-cost-usd", type=float, help="stop starting trials once this much is spent")
+    q.add_argument("--no-skills", action="store_true", help="run without the skill library (an ablation)")
+    q.add_argument("--out", help="results folder (default evals/results/<suite>-tier<N>-<time>)")
+    q.add_argument("--resume", help="a results folder to continue; finished trials are skipped")
+    q.add_argument("--seed", type=int, default=0, help="seed for the model order")
+
+    q = ev_sub.add_parser("perception", help="tier 0: ask models questions about labelled camera frames")
+    q.add_argument("dataset", nargs="?", default=os.path.join(AGENT_DIR, "evals", "perception.jsonl"))
+    q.add_argument("--models", required=True)
+    q.add_argument("--repeats", type=int, default=3)
+    q.add_argument("--parallel", type=int, default=4)
+    q.add_argument("--max-cost-usd", type=float)
+    q.add_argument("--out", help="results folder; reuse one to continue")
+
+    q = ev_sub.add_parser("label", help="build the perception set from traced camera frames")
+    q.add_argument("runs", nargs="+", help="folders with run traces (for example a copy of the arm PC's runs/)")
+    q.add_argument("--out", default=os.path.join(AGENT_DIR, "evals", "perception.jsonl"))
+    q.add_argument("--rotate-180", action="store_true", help="turn frames upside down (recorded before the fix)")
+    q.add_argument("--question", help="ask this about each frame, e.g. 'Is the block between the fingers?'")
+    q.add_argument("--choices", help="allowed answers, comma-separated (default yes,no)")
+    q.add_argument("--category", default="custom")
+    q.add_argument("--limit", type=int, default=50)
+    q.add_argument("--no-auto", action="store_true", help="skip the automatic gripper open/closed items")
+
+    q = ev_sub.add_parser("report", help="success rate vs cost tables, and an HTML page with the chart")
+    q.add_argument("results", nargs="+", help="results folders or results.jsonl files")
+    q.add_argument("--html", help="also write an HTML report here")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="k1-agent", description="AI agent for the K1 arm over k1_web")
     parser.add_argument("--config", help=f"settings file (default {DEFAULT_CONFIG})")
@@ -245,15 +329,17 @@ def main(argv=None):
     p.add_argument("--web-operator", action="store_true", help="add an ask_operator tool answered on the web page")
     add_safety_args(p)
 
+    add_eval_args(sub)
+
     args = parser.parse_args(argv)
     if args.command == "skills" and args.action in ("show", "approve", "reject") and not args.name:
         parser.error(f"skills {args.action} needs a NAME")
     config = load_config(args.config)
     try:
         commands = {"observe": cmd_observe, "run": cmd_run, "serve": cmd_serve, "login": cmd_login,
-                    "skills": cmd_skills, "mcp": cmd_mcp}
+                    "skills": cmd_skills, "mcp": cmd_mcp, "eval": cmd_eval}
         return commands[args.command](config, args) or 0
-    except (K1Error, ValueError, ClaudeCodeError) as e:
+    except (K1Error, ValueError, ClaudeCodeError, EvalError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

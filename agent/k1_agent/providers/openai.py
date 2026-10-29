@@ -5,7 +5,7 @@ GPT-5.x works today; GPT-6 Astra is the same API with a different model name onc
 import base64
 import json
 
-from k1_agent.providers.base import Provider, Reply, ToolCall, ToolSpec
+from k1_agent.providers.base import Provider, Reply, ToolCall, ToolSpec, Usage
 
 
 def to_content(parts: list[dict]) -> list[dict]:
@@ -46,7 +46,19 @@ def from_response(response) -> Reply:
         raw.append(data)
         if data.get("type") == "function_call":
             calls.append(ToolCall(data["call_id"], data["name"], json.loads(data.get("arguments") or "{}")))
-    return Reply(getattr(response, "output_text", "") or "", calls, raw)
+    return Reply(getattr(response, "output_text", "") or "", calls, raw,
+                 usage_of(getattr(response, "usage", None)), getattr(response, "model", None))
+
+
+def usage_of(usage) -> Usage | None:
+    if usage is None:
+        return None
+    details = getattr(usage, "input_tokens_details", None)
+    cached = getattr(details, "cached_tokens", None) or 0
+    reasoning = getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", None) or 0
+    # input_tokens counts cached tokens too; OpenAI bills them at the cached rate
+    return Usage(input=(usage.input_tokens or 0) - cached, output=usage.output_tokens or 0,
+                 cache_read=cached, reasoning=reasoning)
 
 
 class OpenAIProvider(Provider):

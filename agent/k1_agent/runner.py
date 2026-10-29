@@ -14,11 +14,12 @@ skills/pending/ until approved with `k1-agent skills approve`.
 import inspect
 import json
 import re
+import time
 from dataclasses import dataclass
 
 from k1_agent.client import StoppedByOperator
 from k1_agent.primitives import ARM_JOINTS, PROGRAM_API, Primitives
-from k1_agent.providers.base import Provider, Reply, ToolSpec, image_part, text_part
+from k1_agent.providers.base import Provider, Reply, ToolSpec, Usage, image_part, text_part
 from k1_agent.sandbox import run_program
 from k1_agent.skills import SkillLibrary
 from k1_agent.trace import Trace
@@ -98,6 +99,9 @@ class RunResult:
     summary: str
     reason: str             # done | stopped | max_turns | no_program | attempts_exhausted
     trace_dir: str
+    usage: Usage | None = None      # tokens for the whole run
+    cost_usd: float | None = None   # None when a call's model has no price in pricing.yaml
+    llm_calls: int = 0
 
 
 class ConsoleOperator:
@@ -166,7 +170,7 @@ class AgentRunner:
 
     def __init__(self, provider: Provider, prims: Primitives, skills: SkillLibrary, trace: Trace,
                  operator=None, max_turns: int = 40, image_history: int = 3, max_tokens: int = 4096,
-                 program_timeout: float = 180.0):
+                 program_timeout: float = 180.0, pricing=None):
         self.provider = provider
         self.prims = prims
         self.skills = skills
@@ -176,7 +180,11 @@ class AgentRunner:
         self.image_history = image_history
         self.max_tokens = max_tokens
         self.program_timeout = program_timeout
+        self.pricing = pricing
         self.messages: list[dict] = []
+        self.usage = Usage()
+        self.cost_usd: float | None = 0.0
+        self.llm_calls = 0
 
     # ---- shared ----
 
@@ -195,10 +203,21 @@ class AgentRunner:
 
     def chat(self, system: str, tools: list[ToolSpec]) -> Reply:
         prune_images(self.messages, self.image_history)
+        started = time.monotonic()
         reply = self.provider.chat(system, self.messages, tools, self.max_tokens)
+        latency = time.monotonic() - started
         self.messages.append({"role": "assistant", "reply": reply})
+        model = reply.model or self.provider.model
+        cost = self.pricing.cost(model, reply.usage) if self.pricing is not None else None
+        self.llm_calls += 1
+        if reply.usage is not None:
+            self.usage = self.usage + reply.usage
+        # one unpriced call makes the run's total unknown rather than silently too low
+        self.cost_usd = self.cost_usd + cost if (cost is not None and self.cost_usd is not None) else None
         self.trace.log("llm", text=reply.text, tool_calls=[{"name": c.name, "arguments": c.arguments}
-                                                            for c in reply.tool_calls])
+                                                            for c in reply.tool_calls],
+                       model=model, latency_s=round(latency, 3),
+                       usage=reply.usage.as_dict() if reply.usage else None, cost_usd=cost)
         if reply.text.strip():
             self.prims.note(reply.text.strip()[:300])
         return reply
@@ -221,7 +240,9 @@ class AgentRunner:
         return {"ok": False, "error": "unknown_tool", "message": f"no tool {name!r}"}
 
     def finish(self, result: RunResult) -> RunResult:
-        self.trace.log("outcome", success=result.success, summary=result.summary, reason=result.reason)
+        result.usage, result.cost_usd, result.llm_calls = self.usage, self.cost_usd, self.llm_calls
+        self.trace.log("outcome", success=result.success, summary=result.summary, reason=result.reason,
+                       usage=self.usage.as_dict(), cost_usd=self.cost_usd, llm_calls=self.llm_calls)
         self.prims.note(f"{'SUCCESS' if result.success else 'FAILED'} ({result.reason}): {result.summary[:200]}")
         return result
 

@@ -69,8 +69,61 @@ def test_openai_round_trip():
 
 def test_make_provider_rejects_unknown():
     try:
-        make_provider("gemini", "x")
+        make_provider("llama", "x")
     except ValueError as e:
         assert "unknown provider" in str(e)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_usage_is_read_from_each_provider():
+    from k1_agent.providers.anthropic import usage_of as anthropic_usage
+    from k1_agent.providers.openai import usage_of as openai_usage
+
+    u = anthropic_usage(NS(input_tokens=100, output_tokens=20, cache_read_input_tokens=1000,
+                           cache_creation_input_tokens=None))
+    assert u.as_dict() == {"input": 100, "output": 20, "cache_read": 1000, "cache_write": 0, "reasoning": 0}
+    u = openai_usage(NS(input_tokens=1100, output_tokens=50, input_tokens_details=NS(cached_tokens=1000),
+                        output_tokens_details=NS(reasoning_tokens=30)))
+    assert (u.input, u.cache_read, u.output, u.reasoning) == (100, 1000, 50, 30)
+
+
+def test_gemini_round_trip():
+    import pytest
+    types = pytest.importorskip("google.genai.types")
+    from k1_agent.providers.gemini import GeminiProvider
+
+    model_turn = types.Content(role="model", parts=[
+        types.Part(text="thinking...", thought=True),
+        types.Part.from_text(text="Looking."),
+        types.Part(function_call=types.FunctionCall(name="observe", args={}), thought_signature=b"sig")])
+    response = types.GenerateContentResponse(
+        candidates=[types.Candidate(content=model_turn)], model_version="gemini-4-argon",
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=1200, cached_content_token_count=1000, candidates_token_count=40,
+            thoughts_token_count=60))
+    models_api = Recorder(response)
+    models_api.generate_content = models_api.create
+    provider = GeminiProvider("gemini-4-argon", client=NS(models=models_api))
+
+    reply = provider.chat("sys", [{"role": "user", "content": [text_part("task")]}], TOOLS)
+    assert reply.text == "Looking."             # the thought part is not shown as text
+    assert reply.tool_calls[0].name == "observe" and reply.tool_calls[0].id.startswith("gemini_call_")
+    assert (reply.usage.input, reply.usage.cache_read, reply.usage.output, reply.usage.reasoning) == (200, 1000, 100, 60)
+    assert reply.model == "gemini-4-argon"
+    config = models_api.kwargs["config"]
+    assert config.system_instruction == "sys" and config.automatic_function_calling.disable
+    assert config.tools[0].function_declarations[0].name == "observe"
+
+    tool_turn = {"role": "tool", "results": [{"id": reply.tool_calls[0].id, "name": "observe",
+                                              "content": [text_part('{"ok": true}'), image_part(b"\xff\xd8")]}]}
+    provider.chat("sys", conversation(reply)[:2] + [tool_turn, {"role": "user", "content": [text_part("continue")]}],
+                  [])
+    sent = models_api.kwargs["contents"]
+    assert [c.role for c in sent] == ["user", "model", "user"]
+    assert sent[1] is model_turn                                          # replayed unchanged (thought signature)
+    response_part, label, frame, follow_up = sent[2].parts
+    assert response_part.function_response.name == "observe" and response_part.function_response.id is None
+    assert response_part.function_response.response == {"output": '{"ok": true}'}
+    assert frame.inline_data.mime_type == "image/jpeg" and follow_up.text == "continue"
+    assert "tools" not in models_api.kwargs["config"].model_dump(exclude_none=True)

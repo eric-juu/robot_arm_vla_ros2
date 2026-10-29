@@ -14,7 +14,7 @@ Software for the Unitree K1 (Sagittarius) arm, as a ROS 2 workspace:
 | Arm model | `ros2/k1_description/` | URDF and meshes (from NXROBO's Sagittarius). Gives `/tf` and the RViz model. See [its README](ros2/k1_description/README.md). |
 | Web control and motion | `ros2/k1_web/` | Browser UI with joint sliders, saved poses and a live camera feed, reachable from anywhere through a Cloudflare tunnel. Also the safety layer every motion goes through, and the `FollowJointTrajectory` / `GripperCommand` actions for ROS tools. Holds the bringup launch file. See [its README](ros2/k1_web/README.md). |
 | ROS examples | `ros2/k1_examples/` | `ros2 run k1_examples move/gripper/zero/demo`, and a small client class for your own scripts. See [its README](ros2/k1_examples/README.md). |
-| AI agent | `agent/` | An LLM (Claude, or OpenAI GPT-5.x / GPT-6 Astra) that does tasks through the web API, with traces, a skill library and an MCP server. See [its README](agent/README.md). |
+| AI agent | `agent/` | An LLM (Claude, OpenAI GPT-5.x / GPT-6 Astra, or Gemini) that does tasks through the web API, with traces, a skill library, an MCP server, and `k1-agent eval` to compare models' success rate against cost. See [its README](agent/README.md). |
 
 All of it runs on the Linux PC the arm and camera are plugged into: Ubuntu 24.04 + ROS 2 Jazzy. Ubuntu 22.04 + Humble also works; replace `jazzy` with `humble` below and leave out `--break-system-packages`. You only need a browser on the device you control it from.
 

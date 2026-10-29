@@ -9,7 +9,8 @@ An AI agent for the K1 arm. It drives the arm through the same `k1_web` API as t
   - `code`: the model writes a program (code-as-policy). When the program fails, the model diagnoses it from the trace and repairs it.
 - **A skill library** (`skills/*.md`): notes on what works on this arm, read by the agent. New skills the agent drafts wait in `skills/pending/` until you approve them.
 - **An MCP server**, so Claude Code or Codex can be the agent (ASPIRE's own setup).
-- **Pluggable LLMs:** Claude (Anthropic API) or OpenAI (GPT-5.x now, GPT-6 Astra later by changing the model name).
+- **Pluggable LLMs:** Claude (Anthropic API), OpenAI (GPT-5.x now, GPT-6 Astra later by changing the model name) or Google Gemini (for example Gemini 4 Argon).
+- **Model comparison** (`k1-agent eval`): success rate against cost for several models on the same tasks, in a simulated arm or on the real one. See [Comparing models](#comparing-models).
 
 No GPU or ROS is needed on the machine running the agent: the model runs in the provider's cloud.
 
@@ -19,7 +20,7 @@ No GPU or ROS is needed on the machine running the agent: the model runs in the 
 cd ~/Downloads/robot_arm_vla_ros2/agent
 python3 -m venv ~/.k1_agent/venv
 source ~/.k1_agent/venv/bin/activate
-pip install -e ".[all]"          # or .[anthropic], .[openai], .[mcp]
+pip install -e ".[all]"          # or .[anthropic], .[openai], .[gemini], .[mcp]
 ```
 
 Keep the `-e`: the agent reads `config.yaml` and `skills/` from this folder.
@@ -29,6 +30,7 @@ API keys (put them in `~/.k1_agent/keys.sh`, `chmod 600`, and `source` it):
 ```bash
 export ANTHROPIC_API_KEY=...     # for provider: anthropic
 export OPENAI_API_KEY=...        # for provider: openai
+export GEMINI_API_KEY=...        # for provider: gemini
 ```
 
 ## Every session
@@ -114,7 +116,7 @@ Start `claude` in this folder, after sourcing `token.sh`, so the MCP server inhe
 
 | Setting | Meaning |
 |---|---|
-| `provider`, `models` | which LLM: `anthropic`, `openai` or `claude-code`, and the model id for each |
+| `provider`, `models` | which LLM: `anthropic`, `openai`, `gemini` or `claude-code`, and the model id for each |
 | `claude_code` | Claude Code's command, model, whether to use an API key, a per-task timeout |
 | `mode` | `tools` or `code` |
 | `max_turns`, `attempts`, `program_timeout` | how long a run may go on |
@@ -124,6 +126,75 @@ Start `claude` in this folder, after sourcing `token.sh`, so the MCP server inhe
 | `runs_dir`, `skills_dir` | where traces and skills live |
 
 **Switching to GPT-6 Astra:** set `provider: openai` and put the Astra model id under `models.openai` (check the exact id in OpenAI's docs once you have access). Nothing else changes.
+
+## Comparing models
+
+Step-by-step guide: [evals/README.md](evals/README.md).
+
+`k1-agent eval` runs the same tasks with several models and reports **success rate against cost**, the way ASPIRE compares agents. A task's checker decides success, never the model's own claim. A model that says "done" without doing the task fails the trial, and it's counted as a *false success*.
+
+There are three tiers. Tiers 0 and 1 run on any computer, including Windows, with no ROS and no arm. Only tier 2 needs the arm PC.
+
+| Tier | What it tests | Where | Command |
+|---|---|---|---|
+| 0 | **Perception:** reading wrist-camera frames ("is the gripper open?", "is the block between the fingers?") | anywhere, from saved frames | `eval label`, `eval perception` |
+| 1 | **Decision-making:** tool use, following the rules, honesty (limits, a blocked joint, STOP, asking when unclear) | a simulated arm (the real k1_web server, in-process) | `eval run --tier 1` |
+| 2 | **End to end:** the real arm, with an operator who resets the scene and judges each trial on the web page without being told the model | the real arm (`--url`) | `eval run --tier 2` |
+
+The tasks are in `evals/tasks.yaml`, with the checks explained at the top of the file.
+
+### Running a comparison
+
+```bash
+pip install -e ".[all,test]"      # the test extras include the simulator's web server
+# API keys as above; Claude Code models need `k1-agent login`
+
+# a pilot: 1 trial per task, to see what a full run costs
+k1-agent eval run --models claude-haiku-5-5,claude-opus-5-5,gpt-5.5,gemini-4-argon,claude-code:sonnet --trials 1
+
+# the full run: 10 trials, 4 simulated arms side by side, stop starting new trials after $50
+k1-agent eval run --models ... --trials 10 --parallel 4 --max-cost-usd 50
+
+k1-agent eval report evals/results/<run> --html report.html
+```
+
+- **Models:**
+  - A bare id picks the provider from its name (`claude-…`, `gpt-…`, `gemini-…`).
+  - Otherwise write `provider:model`, for example `claude-code:sonnet`.
+  - Add `@effort` for an effort or reasoning level, for example `gpt-5.5@high` or `claude-opus-5-5@low` (OpenAI and Claude API only).
+- **Other options:**
+  - `--modes tools,code`, and `--no-skills` for the ablation, run the ASPIRE variations.
+  - `--tasks S1-single-joint,…` picks tasks.
+  - `--resume <folder>` continues an interrupted run, skipping finished trials.
+- **Order:** trials run in shuffled model order, so slow drift (rate limits, on the real arm lighting or battery) affects every model alike.
+- **Output:** each trial writes one row to `<run>/results.jsonl`. A row holds:
+  - success, claimed success, cost, tokens and time;
+  - the real model id;
+  - the git commit, config, prompts and skills version it ran with.
+
+  Its full trace goes to `<run>/traces/`. Each run uses its own copy of the skill library, so skill drafts written during trials stay in the run folder.
+- **Report:**
+  - a success-vs-cost table with 95% intervals, $ per success and false successes;
+  - a per-task table;
+  - an HTML page with the scatter plot. Models marked `*` are on the frontier: nothing else is both cheaper and at least as successful.
+
+### Perception (tier 0)
+
+```bash
+# copy run traces from the arm PC first, e.g. scp -r armpc:~/Downloads/robot_arm_vla_ros2/agent/runs ./arm-runs
+k1-agent eval label ./arm-runs                                    # automatic: gripper open/closed
+k1-agent eval label ./arm-runs --question "Is the block between the fingers?" --category grasp
+k1-agent eval perception --models claude-opus-5-5,gemini-4-argon,gpt-5.5 --repeats 3
+```
+
+- **Labelling:** `label` copies frames into `evals/frames/` and adds items to `evals/perception.jsonl`. With `--question` it opens each frame and asks you for the answer.
+- **Old frames:** frames recorded before the camera-flip fix are upside down. Add `--rotate-180` so the models see them the way the agent sees frames now.
+- **Scoring:** every question also offers "can't tell", which counts as an abstention, not a wrong answer. The report gives accuracy, abstentions, *confidently wrong* answers, and $ per 100 questions.
+
+### Cost
+
+- **API models:** tokens come from every API call and are priced from `pricing.yaml`. Check its rates against the providers' pricing pages before a big run. A model missing from the file shows `$?`.
+- **Claude Code:** the cost is Claude Code's own API-equivalent estimate. It's billed to your subscription, not to an API key.
 
 ## Safety
 

@@ -2,12 +2,14 @@
 
 url: http://127.0.0.1:8080      # k1_web; or the https://….trycloudflare.com link to run the agent elsewhere
 
-provider: anthropic             # anthropic | openai | claude-code
+provider: anthropic             # anthropic | openai | gemini | claude-code
 models:
   anthropic: claude-opus-5-5
   openai: gpt-5.5
+  gemini: gemini-4-argon
   # GPT-6 Astra: set provider: openai and models.openai to the Astra model id once you have API access
 openai_reasoning_effort: null   # e.g. low | medium | high, for OpenAI reasoning models
+# prices for the cost in traces and `k1-agent eval` are in pricing.yaml (next to this file)
 
 # provider claude-code: Claude Code is the agent, signed in with a Claude account (`k1-agent login`), no API key
 claude_code:

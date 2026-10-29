@@ -1,7 +1,7 @@
 """Claude through the Anthropic Messages API (tool use + images). Key: ANTHROPIC_API_KEY."""
 import base64
 
-from k1_agent.providers.base import Provider, Reply, ToolCall, ToolSpec
+from k1_agent.providers.base import Provider, Reply, ToolCall, ToolSpec, Usage
 
 
 def to_blocks(parts: list[dict]) -> list[dict]:
@@ -51,21 +51,32 @@ def from_response(response) -> Reply:
     raw = [block_to_dict(b) for b in response.content]
     text = "\n".join(b["text"] for b in raw if b["type"] == "text")
     calls = [ToolCall(b["id"], b["name"], dict(b["input"] or {})) for b in raw if b["type"] == "tool_use"]
-    return Reply(text, calls, raw)
+    return Reply(text, calls, raw, usage_of(getattr(response, "usage", None)), getattr(response, "model", None))
+
+
+def usage_of(usage) -> Usage | None:
+    if usage is None:
+        return None
+    return Usage(input=usage.input_tokens or 0, output=usage.output_tokens or 0,
+                 cache_read=getattr(usage, "cache_read_input_tokens", None) or 0,
+                 cache_write=getattr(usage, "cache_creation_input_tokens", None) or 0)
 
 
 class AnthropicProvider(Provider):
     name = "anthropic"
 
-    def __init__(self, model: str, client=None, api_key: str | None = None):
+    def __init__(self, model: str, client=None, api_key: str | None = None, effort: str | None = None):
         super().__init__(model)
         if client is None:
             import anthropic
             client = anthropic.Anthropic(api_key=api_key)
         self.client = client
+        self.effort = effort        # low | medium | high | xhigh | max; None = the model's default
 
     def chat(self, system: str, messages: list[dict], tools: list[ToolSpec], max_tokens: int = 4096) -> Reply:
         kwargs = {}
+        if self.effort:
+            kwargs["output_config"] = {"effort": self.effort}
         if tools:
             kwargs["tools"] = [{"name": t.name, "description": t.description, "input_schema": t.parameters}
                                for t in tools]
