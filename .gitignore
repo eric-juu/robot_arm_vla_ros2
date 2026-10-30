@@ -169,3 +169,8 @@ agent/evals/results/
 
 # local Claude Code plans (not shared)
 .claude/plans/
+
+# colcon build output (build in ~/ros2_ws, not here)
+build/
+install/
+log/
