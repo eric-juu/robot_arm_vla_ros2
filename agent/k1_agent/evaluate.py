@@ -33,6 +33,7 @@ ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_roll", "wris
 MOTION_NAMES = {"move_joints", "move_joint_delta", "go_pose", "go_home", "set_gripper"}
 DEFAULT_ANSWER = "Yes, go ahead."
 DEFAULT_TOL = 0.03
+CLI_AGENTS = {"claude-code": "claude", "codex": "codex"}     # providers run as a coding agent's CLI
 
 
 class EvalError(Exception):
@@ -43,7 +44,7 @@ class EvalError(Exception):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    provider: str           # anthropic | openai | gemini | claude-code
+    provider: str           # anthropic | openai | gemini | claude-code | codex
     model: str
     effort: str | None = None
 
@@ -53,7 +54,7 @@ class ModelSpec:
 
 
 def parse_model(text: str) -> ModelSpec:
-    """'claude-opus-5-5', 'openai:gpt-5.5@high', 'claude-code:sonnet' -> ModelSpec."""
+    """'claude-opus-5-5', 'openai:gpt-5.5@high', 'claude-code:sonnet', 'codex:gpt-6-astra' -> ModelSpec."""
     text = text.strip()
     provider, _, rest = text.partition(":") if ":" in text else ("", "", text)
     model, _, effort = rest.partition("@")
@@ -66,7 +67,7 @@ def parse_model(text: str) -> ModelSpec:
             provider = "openai"
         else:
             raise EvalError(f"can't tell the provider of {model!r}; write it as provider:model")
-    if provider not in ("anthropic", "openai", "gemini", "claude-code"):
+    if provider not in ("anthropic", "openai", "gemini", *CLI_AGENTS):
         raise EvalError(f"unknown provider {provider!r} in {text!r}")
     return ModelSpec(provider, model, effort or None)
 
@@ -360,7 +361,8 @@ class Evaluator:
                  log=print):
         from k1_agent.pricing import Pricing
 
-        self.out_dir = out_dir
+        # absolute, so the paths in eval-config.yaml also work for an MCP server started in another folder (Codex)
+        self.out_dir = out_dir = os.path.abspath(out_dir)
         self.results_path = os.path.join(out_dir, "results.jsonl")
         # the run gets its own copy of the approved skills (or none, for the ablation), so skill drafts written
         # during trials, and Claude Code's MCP traces, stay in the results folder
@@ -432,6 +434,9 @@ class Evaluator:
             env.web_operator.wait_for_reset(f"Next trial. {task.get('setup', 'Set up the scene.')} "
                                             "Press Done when it is ready.")
         env.client.clear_stopped()
+        if env.sim is not None:
+            # the client's last state may predate the reset (ready: false), and motions check it
+            env.client.wait_for(lambda s: s.get("ready"), timeout=2.0, after_seq=env.client.state_seq)
         if env.page is not None:
             env.page.answer, env.page.on_reset = answer, reset
 
@@ -464,7 +469,7 @@ class Evaluator:
         passed, failures = check_trial(task["check"], ctx) if error is None else (False, [error])
 
         model_id = next((e.get("model") for e in trace.entries
-                         if e.get("kind") in ("llm", "claude_code_init") and e.get("model")), None)
+                         if e.get("kind") in ("llm", "claude_code_init", "codex_init") and e.get("model")), None)
         usage = result.usage.as_dict() if result is not None and result.usage is not None else None
         return {
             "kind": "trial", "key": job.key, "suite_task": task["id"], "tier": task["tier"], "mode": job.mode,
@@ -481,15 +486,19 @@ class Evaluator:
 
     def _run_agent(self, job: Job, env: Env, trace: Trace, allow_motion: bool, answer: str, reset):
         cfg = self.config
-        if job.model.provider == "claude-code":
+        if job.model.provider in CLI_AGENTS:
             from k1_agent.claude_code import ClaudeCodeRunner
+            from k1_agent.codex import CodexRunner
 
-            cc = cfg.get("claude_code") or {}
+            if job.model.provider == "claude-code":
+                cc, runner_class, extra = cfg.get("claude_code") or {}, ClaudeCodeRunner, {}
+            else:   # Codex reports tokens, not cost
+                cc, runner_class, extra = cfg.get("codex") or {}, CodexRunner, {"pricing": self.pricing}
             flags = (["--allow-motion"] if allow_motion else []) + ["--max-steps", str(cfg["max_steps"])]
-            runner = ClaudeCodeRunner(env.client, trace, env.client.http_url, cfg["config_path"], flags,
-                                      model=job.model.model if job.model.model != "default" else None,
-                                      command=cc.get("command") or "claude", use_api_key=bool(cc.get("use_api_key")),
-                                      timeout=cc.get("timeout", 900))
+            runner = runner_class(env.client, trace, env.client.http_url, cfg["config_path"], flags,
+                                  model=job.model.model if job.model.model != "default" else None,
+                                  command=cc.get("command") or CLI_AGENTS[job.model.provider],
+                                  use_api_key=bool(cc.get("use_api_key")), timeout=cc.get("timeout", 900), **extra)
             return runner.run(job.task["prompt"], job.mode)
 
         from k1_agent.primitives import Primitives
@@ -551,8 +560,8 @@ def run_suite(config: dict, tasks: list[dict], models: list[ModelSpec], out_dir:
         raise EvalError("tier 2 runs on the real arm: give --url (and set K1_WEB_TOKEN)")
     if real:
         parallel = 1
-    if any(m.provider == "claude-code" for m in models) and parallel > 1:
-        log("note: Claude Code trials share your subscription's limits; consider --parallel 1")
+    if any(m.provider in CLI_AGENTS for m in models) and parallel > 1:
+        log("note: Claude Code and Codex trials share your subscription's limits; consider --parallel 1")
 
     os.makedirs(out_dir, exist_ok=True)
     evaluator = Evaluator(config, out_dir, skills_on, max_cost_usd, log)
@@ -662,7 +671,7 @@ def run_perception(config: dict, dataset: str, models: list[ModelSpec], out_dir:
     from k1_agent.providers.base import image_part, text_part
 
     items = load_dataset(dataset)
-    api_models = [m for m in models if m.provider != "claude-code"]
+    api_models = [m for m in models if m.provider not in CLI_AGENTS]
     for m in set(models) - set(api_models):
         log(f"skipping {m.label}: perception tests call the model API directly")
     os.makedirs(out_dir, exist_ok=True)

@@ -35,6 +35,7 @@ CLIENT_ROLES = ("human", "agent")
 MAX_NOTE_CHARS = 500
 MAX_PROMPT_CHARS = 2000
 AGENT_MODES = ("tools", "code")
+MAX_AGENT_MODELS = 20  # models an agent service may offer the page
 QUESTION_KINDS = ("ask", "confirm", "reset")
 
 
@@ -236,7 +237,12 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
                 raise CommandError("no agent service is running (start `k1-agent serve` on the PC)")
             if status.get("state") != "idle":
                 raise CommandError("the agent is busy; wait for it to finish, or press STOP")
-            await send_to("agent", {"type": "agent_prompt", "text": text, "mode": mode})
+            prompt = {"type": "agent_prompt", "text": text, "mode": mode}
+            if msg.get("model") is not None:     # one of the models the service offers (`serve --models`)
+                if msg["model"] not in status.get("models", []):
+                    raise CommandError(f"'model' must be one of {status.get('models', [])}")
+                prompt["model"] = msg["model"]
+            await send_to("agent", prompt)
             await broadcast({"type": "agent_note", "text": f"prompt: {text[:MAX_NOTE_CHARS]}", "by": "human"})
             return None
         if kind == "agent_status":         # agent service -> everyone, through state["agent"]
@@ -244,8 +250,12 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             status = msg.get("status")
             if not isinstance(status, dict) or status.get("state") not in ("idle", "running"):
                 raise CommandError("'status' must be an object with state 'idle' or 'running'")
-            conn["status"] = {k: (bool(v) if k == "allow_motion" else str(v)[:200]) for k, v in status.items()
-                              if k in ("state", "task", "provider", "model", "allow_motion")}
+            models = status.get("models")
+            if models is not None and (not isinstance(models, list) or len(models) > MAX_AGENT_MODELS):
+                raise CommandError(f"'models' must be a list of at most {MAX_AGENT_MODELS} names")
+            conn["status"] = {k: (bool(v) if k == "allow_motion" else [str(m)[:200] for m in v] if k == "models"
+                                  else str(v)[:200]) for k, v in status.items()
+                              if k in ("state", "task", "provider", "model", "models", "allow_motion")}
             return None
         if kind == "agent_question":       # agent -> humans
             require_role(conn, "agent", kind)

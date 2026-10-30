@@ -73,11 +73,25 @@ $("prompt-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const text = $("prompt").value.trim();
   if (!text) return;
-  send({type: "agent_prompt", text, mode: $("prompt-mode").value, id: "prompt"});
+  const msg = {type: "agent_prompt", text, mode: $("prompt-mode").value, id: "prompt"};
+  if (!$("prompt-model").hidden) msg.model = $("prompt-model").value;
+  send(msg);
 });
 $("prompt").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("prompt-form").requestSubmit(); }
 });
+
+// the models the agent service offers (`k1-agent serve --models ...`); keeps the operator's pick across updates
+function showModels(models) {
+  const select = $("prompt-model");
+  const list = Array.isArray(models) ? models : [];
+  select.hidden = list.length < 2;
+  if (list.join("\n") === select.dataset.models) return;
+  const picked = select.value;
+  select.dataset.models = list.join("\n");
+  select.replaceChildren(...list.map((m) => new Option(m, m)));
+  if (list.includes(picked)) select.value = picked;
+}
 
 let question = null;    // the agent's open question: {qid, text, kind}
 
@@ -188,6 +202,7 @@ function render() {
   $("agent-status").textContent = !agent ? "· no agent service (start k1-agent serve on the PC)"
     : `· ${agent.provider}:${agent.model} · ${agent.state === "running" ? `running: ${agent.task}` : "ready"}` +
       (agent.allow_motion === false ? " · dry run (no motion)" : "");
+  showModels(agent && agent.models);
   $("prompt").disabled = !agent;
   $("prompt-send").disabled = !idle;
   if (!agent && question) showQuestion(null);

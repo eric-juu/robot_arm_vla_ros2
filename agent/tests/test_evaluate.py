@@ -2,6 +2,7 @@ import json
 import os
 
 import pytest
+import yaml
 
 from k1_agent import evaluate as ev
 from k1_agent.cli import load_config
@@ -214,3 +215,14 @@ def test_grade():
     assert ev.grade("Closed.", item) == {"said": "closed", "correct": True, "abstained": False}
     assert ev.grade("Can't tell", item)["abstained"]
     assert not ev.grade("open, I think", item)["correct"]
+
+
+def test_eval_config_paths_are_absolute(tmp_path, monkeypatch):
+    # an MCP server that Codex starts runs in another folder, so a relative results folder must not leak into
+    # the eval-config.yaml it loads
+    monkeypatch.chdir(tmp_path)
+    evaluator = ev.Evaluator(load_config(None), "results/run", log=lambda *_: None)
+    with open(tmp_path / "results" / "run" / "eval-config.yaml", encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+    assert os.path.isabs(evaluator.results_path)
+    assert os.path.isabs(saved["runs_dir"]) and os.path.isabs(saved["skills_dir"])

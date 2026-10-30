@@ -50,6 +50,7 @@ On macOS/Linux, use `export ANTHROPIC_API_KEY=...` and so on.
 | `claude-opus-5-5@low` | Claude at a lower effort level |
 | `gemini-4-argon` | Gemini |
 | `claude-code:sonnet`, `claude-code:haiku` | Claude Code with your subscription |
+| `codex:gpt-6-astra` | Codex with your ChatGPT sign-in (`codex login`) |
 | `openai:<any-id>` | any model id, with the provider spelled out |
 
 ## 3. Tier 1: the simulated arm
@@ -205,5 +206,6 @@ evals/results/<run>/            (git-ignored)
 | `can't tell the provider of ...` | Write the model as `provider:model` |
 | `ModuleNotFoundError: fastapi` / `uvicorn` | `pip install -e ".[all,test]"`; the simulator needs them |
 | Claude Code trials fail with "not signed in" | `k1-agent login` |
+| Codex trials fail with "required MCP servers failed to initialize" | Check that `codex-code-mode-host` is installed next to `codex`, and that `k1-agent mcp` starts (`--url` reachable) |
 | Tier 2: `tier 2 runs on the real arm: give --url` | Add `--url` and set `K1_WEB_TOKEN` |
 | A run stopped early | It hit `--max-cost-usd` or was interrupted: rerun with `--resume evals/results/<run>` |

@@ -10,8 +10,8 @@ k1-agent command line.
     k1-agent eval run|perception|label|report ...      compare models: success rate against cost
 
 The k1_web token comes from K1_WEB_TOKEN (or K1_WEB_ADMIN_PASSWORD); API keys from ANTHROPIC_API_KEY,
-OPENAI_API_KEY or GEMINI_API_KEY. The claude-code provider needs no key: it uses the Claude account
-Claude Code is signed in with.
+OPENAI_API_KEY or GEMINI_API_KEY. The claude-code and codex providers need no key: they use the account
+Claude Code (`k1-agent login`) or Codex (`codex login`) is signed in with.
 """
 import argparse
 import json
@@ -22,6 +22,7 @@ import time
 import yaml
 
 from k1_agent.claude_code import ClaudeCodeError
+from k1_agent.codex import CodexError
 from k1_agent.client import K1Client, K1Error
 from k1_agent.evaluate import EvalError
 from k1_agent.primitives import Primitives
@@ -50,7 +51,7 @@ def add_safety_args(p: argparse.ArgumentParser):
 
 
 def add_provider_args(p: argparse.ArgumentParser):
-    p.add_argument("--provider", choices=["anthropic", "openai", "gemini", "claude-code"])
+    p.add_argument("--provider", choices=["anthropic", "openai", "gemini", "claude-code", "codex"])
     p.add_argument("--model")
 
 
@@ -74,44 +75,63 @@ def cmd_observe(config, args):
 
 
 def mcp_safety_args(args) -> list[str]:
-    """The run's safety flags, passed on to the `k1-agent mcp` server that Claude Code starts."""
+    """The run's safety flags, passed on to the `k1-agent mcp` server that Claude Code or Codex starts."""
     flags = (["--allow-motion"] if args.allow_motion else []) + (["--allow-enable"] if args.allow_enable else [])
     return flags + (["--max-steps", str(args.max_steps)] if args.max_steps else [])
 
 
-def build_task_runner(config, args, client, log=print):
-    """Returns (run_task(text, mode, operator) -> RunResult, info) for the chosen provider."""
-    provider_name = args.provider or config["provider"]
+def build_task_runner(config, args, client, log=print, spec=None):
+    """Returns (run_task(text, mode, operator) -> RunResult, info) for the chosen provider: `spec` (an
+    evaluate.ModelSpec) if given, else --provider / --model / config."""
+    provider_name = spec.provider if spec else args.provider or config["provider"]
+    effort = spec.effort if spec else None
     skills = SkillLibrary(config["skills_dir"])
 
-    if provider_name == "claude-code":
-        from k1_agent.claude_code import ClaudeCodeRunner, login_status
+    if provider_name in ("claude-code", "codex"):      # a coding agent's CLI, signed in to its own account
+        if effort:
+            raise ValueError(f"effort levels aren't supported for {provider_name} ({spec.label})")
+        if provider_name == "claude-code":
+            from k1_agent.claude_code import ClaudeCodeRunner as Runner, login_status
 
-        cc = config.get("claude_code") or {}
-        command = cc.get("command") or "claude"
+            cc, label, extra = config.get("claude_code") or {}, "Claude Code", {}
+            command = cc.get("command") or "claude"
+            extra["max_budget_usd"] = cc.get("max_budget_usd")
+            error, sign_in = ClaudeCodeError, "`k1-agent login`"
+        else:
+            from k1_agent.codex import CodexError, CodexRunner as Runner, login_status
+            from k1_agent.pricing import Pricing
+
+            cc, label = config.get("codex") or {}, "Codex"
+            command = cc.get("command") or "codex"
+            extra = {"pricing": Pricing.load()}         # Codex reports tokens, not cost
+            error, sign_in = CodexError, "`codex login`"
         if not login_status(command).get("loggedIn"):
-            raise ClaudeCodeError("Claude Code is not signed in: run `k1-agent login` first")
-        model = args.model or cc.get("model")
+            raise error(f"{label} is not signed in: run {sign_in} first")
+        model = spec.model if spec else args.model or cc.get("model")
+        model = None if model == "default" else model
 
         def run_task(text, mode, operator):
             trace = Trace(config["runs_dir"], text)
-            log(f"running with Claude Code ({model or 'default model'}); trace in {trace.dir}")
-            runner = ClaudeCodeRunner(client, trace, args.url or config["url"], config["config_path"],
-                                      mcp_safety_args(args), model=model, command=command,
-                                      use_api_key=bool(cc.get("use_api_key")),
-                                      max_budget_usd=cc.get("max_budget_usd"), timeout=cc.get("timeout", 900))
+            log(f"running with {label} ({model or 'default model'}); trace in {trace.dir}")
+            runner = Runner(client, trace, args.url or config["url"], config["config_path"], mcp_safety_args(args),
+                            model=model, command=command, use_api_key=bool(cc.get("use_api_key")),
+                            timeout=cc.get("timeout", 900), **extra)
             return runner.run(text, mode)
 
-        return run_task, {"provider": "claude-code", "model": model or "default", "allow_motion": args.allow_motion}
+        return run_task, {"provider": provider_name, "model": model or "default", "allow_motion": args.allow_motion}
 
     from k1_agent.pricing import Pricing
     from k1_agent.providers.base import make_provider
     from k1_agent.runner import AgentRunner
 
-    model = args.model or config["models"][provider_name]
+    model = spec.model if spec else args.model or config["models"][provider_name]
     kwargs = {}
-    if provider_name == "openai" and config.get("openai_reasoning_effort"):
-        kwargs["reasoning_effort"] = config["openai_reasoning_effort"]
+    if provider_name == "openai" and (effort or config.get("openai_reasoning_effort")):
+        kwargs["reasoning_effort"] = effort or config["openai_reasoning_effort"]
+    elif provider_name == "anthropic" and effort:
+        kwargs["effort"] = effort
+    elif effort:
+        raise ValueError(f"effort levels aren't supported for {provider_name} ({spec.label})")
     provider = make_provider(provider_name, model, **kwargs)
     pricing = Pricing.load()
 
@@ -132,7 +152,8 @@ def build_task_runner(config, args, client, log=print):
                 else "could not save a skill draft")
         return result
 
-    return run_task, {"provider": provider_name, "model": model, "allow_motion": args.allow_motion}
+    return run_task, {"provider": provider_name, "model": model + (f"@{effort}" if effort else ""),
+                      "allow_motion": args.allow_motion}
 
 
 def cmd_run(config, args):
@@ -142,8 +163,9 @@ def cmd_run(config, args):
         run_task, info = build_task_runner(config, args, client)
         if not args.allow_motion:
             print("note: --allow-motion not given, so every motion will be refused (dry run)")
-        if info["provider"] == "claude-code":
-            print("note: Claude Code's questions appear on the web page")
+        if info["provider"] in ("claude-code", "codex"):
+            print(f"note: {'Claude Code' if info['provider'] == 'claude-code' else 'Codex'}'s questions appear on "
+                  "the web page")
         result = run_task(args.task, args.mode or config["mode"], ConsoleOperator())
         print(f"\n{'SUCCESS' if result.success else 'FAILED'} ({result.reason}): {result.summary}")
         if result.cost_usd is not None:
@@ -160,12 +182,21 @@ def cmd_serve(config, args):
             print(text)
             client.note(text[:300])
 
-        run_task, info = build_task_runner(config, args, client, log=log)
+        choices = {}
+        models = args.models or ",".join(config.get("serve_models") or [])
+        if models:      # the page gets a model menu; the first model is the default
+            from k1_agent.evaluate import parse_models
+
+            for spec in parse_models(models):
+                choices[spec.label] = build_task_runner(config, args, client, log=log, spec=spec)
+            run_task, info = next(iter(choices.values()))
+        else:
+            run_task, info = build_task_runner(config, args, client, log=log)
         if not args.allow_motion:
             print("note: --allow-motion not given, so every motion will be refused (dry run)")
-        print(f"agent service ready ({info['provider']}:{info['model']}). Type tasks into the web page's "
-              "agent card; Ctrl+C here quits.")
-        AgentService(client, run_task, info).serve_forever()
+        offered = ", ".join(choices) or f"{info['provider']}:{info['model']}"
+        print(f"agent service ready ({offered}). Type tasks into the web page's agent card; Ctrl+C here quits.")
+        AgentService(client, run_task, info, choices=choices if len(choices) > 1 else None).serve_forever()
 
 
 def cmd_login(config, args):
@@ -261,7 +292,8 @@ def add_eval_args(sub):
     q = ev_sub.add_parser("run", help="run a task suite: tier 1 in the simulator, tier 2 on the real arm (--url)")
     q.add_argument("suite", nargs="?", default=os.path.join(AGENT_DIR, "evals", "tasks.yaml"))
     q.add_argument("--models", required=True,
-                   help="comma-separated, e.g. claude-haiku-5-5,openai:gpt-5.5@high,gemini-4-argon,claude-code:sonnet")
+                   help="comma-separated, e.g. claude-haiku-5-5,openai:gpt-5.5@high,gemini-4-argon,claude-code:sonnet,"
+                        "codex:gpt-6-astra")
     q.add_argument("--tier", type=int, choices=[1, 2], default=1)
     q.add_argument("--tasks", help="only these task ids (comma-separated)")
     q.add_argument("--modes", help="tools,code (default: each task's first mode)")
@@ -314,6 +346,8 @@ def main(argv=None):
 
     p = sub.add_parser("serve", help="run tasks typed into the web page's agent card")
     add_provider_args(p)
+    p.add_argument("--models", help="models the page can choose from, the first is the default (comma-separated, "
+                                    "e.g. claude-code:claude-opus-5-5,gpt-6-astra); overrides --provider/--model")
     p.add_argument("--attempts", type=int)
     add_safety_args(p)
 
@@ -339,7 +373,7 @@ def main(argv=None):
         commands = {"observe": cmd_observe, "run": cmd_run, "serve": cmd_serve, "login": cmd_login,
                     "skills": cmd_skills, "mcp": cmd_mcp, "eval": cmd_eval}
         return commands[args.command](config, args) or 0
-    except (K1Error, ValueError, ClaudeCodeError, EvalError) as e:
+    except (K1Error, ValueError, ClaudeCodeError, CodexError, EvalError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -25,7 +25,9 @@ models:
   gpt-5.5:
     {input: 5.00, output: 30.00, cache_read: 0.50, cache_write: 0.0,
      long_context: {above: 272000, input: 10.00, output: 45.00}}
-  # gpt-6-astra: {input: 10.00, output: 50.00, cache_read: 1.00, cache_write: 0.0}   # unconfirmed; fill in with the real id
+  gpt-6-astra:      # from third-party summaries (2026-10-29); confirm on openai.com/api/pricing
+    {input: 10.00, output: 50.00, cache_read: 1.00, cache_write: 0.0,
+     long_context: {above: 272000, input: 20.00, output: 75.00}}
 
   # Google: ai.google.dev/gemini-api/docs/pricing. Introductory Argon price ends 2026-11-30.
   gemini-4-argon:

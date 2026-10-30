@@ -144,6 +144,7 @@ body.login input {
   color: var(--text);
 }
 .prompt textarea { width: 100%; resize: vertical; }
+#prompt-model { min-width: 0; text-overflow: ellipsis; }
 .question {
   margin-bottom: 12px;
   padding: 10px 12px;

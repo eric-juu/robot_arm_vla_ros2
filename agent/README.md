@@ -84,25 +84,46 @@ How it is locked down:
 - **API key:** `ANTHROPIC_API_KEY` is removed from Claude Code's environment, so the signed-in account pays. To bill the key instead, set `claude_code.use_api_key: true`.
 - **Traces:** the run's narration and tool calls go to `runs/<time>-<task>/`. The MCP server's own trace, with frames, goes to `runs/<time>-mcp/`.
 
+## Codex as the model (ChatGPT sign-in, no API key)
+
+With `--provider codex` (or `codex:<model>` in `--models`) the agent is a headless OpenAI Codex session, billed to the ChatGPT account Codex is signed in with instead of `OPENAI_API_KEY`.
+
+1. Install Codex (https://github.com/openai/codex). With the standalone Linux binary, also install `codex-code-mode-host` from the same release next to it: without it the k1 tools never reach the model.
+2. Sign in once: `codex login` (`codex login --device-auth` on a PC without a browser).
+3. Run tasks as usual:
+   ```bash
+   k1-agent run "point the camera at the cup" --provider codex --model gpt-6-astra --allow-motion
+   k1-agent serve --models claude-code:claude-opus-5-5,codex:gpt-6-astra --allow-motion
+   ```
+
+How it is locked down:
+- **Tools:** Codex has no switch that leaves only MCP tools, so its own tools (shell, browser, computer use, plugins, sub-agents...) are turned off one by one. The rest is fenced in: a read-only sandbox in an empty folder, and only the k1 server's tools are pre-approved. See `k1_agent/codex.py`, and recheck it after upgrading Codex. Any other tool use is logged in the trace as `codex_item`.
+- **Same limits, questions and STOP** as Claude Code above.
+- **API key:** `OPENAI_API_KEY` is removed from Codex's environment, so the signed-in account pays. To bill the key instead, set `codex.use_api_key: true`.
+- **Cost:** Codex reports tokens, not cost, so the cost shown is estimated from `pricing.yaml`.
+
 ## Prompting from the web page
 
 `k1-agent serve` keeps the agent connected and runs the tasks people type into the page's **Agent** card, one at a time:
 
 ```bash
 k1-agent serve --provider claude-code --allow-motion      # or --provider anthropic / openai
+k1-agent serve --models claude-code:claude-opus-5-5,claude-code:claude-sonnet-5-5,gpt-5.5,gpt-6-astra --allow-motion
 ```
+
+With `--models` (or `serve_models:` in `config.yaml`) the card gets a model menu, so each task can use a different model; the first one is the default. The names are the same as for `k1-agent eval` (`gpt-5.5@high` sets an effort level). Every model is set up when the service starts, so a missing API key or a Claude Code sign-in shows up right away.
 
 - **The card shows:**
   - the provider and model;
   - whether the agent is ready or running;
   - "dry run" when the service has no `--allow-motion`.
-- **Sending a task:** type it and press Enter (Shift+Enter adds a new line). Pick `tools` or `code` mode first.
+- **Sending a task:** type it and press Enter (Shift+Enter adds a new line). Pick the model (when the service offers several) and `tools` or `code` mode first.
 - **Agent questions:**
   - questions show up in the card with an answer box;
   - yes/no checks, such as "save a skill draft?", get Yes and No buttons;
   - between code-mode attempts, a "scene is reset" button.
 - **STOP** (Esc, or Space when not typing) ends the current task. The service then waits for the next prompt.
-- **What the page can't change:** the safety flags. They come only from the `serve` command line.
+- **What the page can't change:** the safety flags, or which models are on offer. They come only from the `serve` command line.
 
 ## Using Claude Code (or Codex) as the agent
 

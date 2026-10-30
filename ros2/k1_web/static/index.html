@@ -66,6 +66,7 @@
       <form id="prompt-form" class="prompt">
         <textarea id="prompt" rows="2" maxlength="2000" placeholder="Tell the agent what to do, e.g. &quot;point the camera at the red cup&quot;" disabled></textarea>
         <div class="row">
+          <select id="prompt-model" title="the model that runs this task" hidden></select>
           <select id="prompt-mode" title="tools: one step at a time, sees every frame · code: writes a program">
             <option value="tools">tools</option>
             <option value="code">code</option>

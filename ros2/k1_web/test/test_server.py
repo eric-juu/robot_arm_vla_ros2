@@ -187,3 +187,28 @@ def test_prompting_the_agent_service(setup):
         receive_until(agent, "ack")
         human.send_json({"type": "agent_prompt", "text": "again", "id": 5})
         assert "busy" in receive_until(human, "error")["message"]
+
+
+def test_prompt_names_one_of_the_offered_models(setup):
+    client, _, _, _ = setup
+    login(client)
+    with client.websocket_connect("/ws") as human, \
+            client.websocket_connect("/ws", headers={"Authorization": f"Bearer {TOKEN}"}) as agent:
+        agent.send_json({"type": "hello", "role": "agent", "id": 1})
+        receive_until(agent, "ack")
+        agent.send_json({"type": "agent_status", "status": {"state": "idle", "models": "gpt-5.5"}, "id": 2})
+        assert "'models' must be a list" in receive_until(agent, "error")["message"]
+        offered = ["claude-code:claude-opus-5-5", "openai:gpt-6-astra"]
+        agent.send_json({"type": "agent_status", "status": {"state": "idle", "models": offered}, "id": 3})
+        receive_until(agent, "ack")
+        for _ in range(50):
+            if (receive_until(human, "state")["agent"] or {}).get("models") == offered:
+                break
+        else:
+            raise AssertionError("the offered models never showed up in state")
+
+        human.send_json({"type": "agent_prompt", "text": "wave", "model": "openai:gpt-9", "id": 4})
+        assert "must be one of" in receive_until(human, "error")["message"]
+        human.send_json({"type": "agent_prompt", "text": "wave", "model": "openai:gpt-6-astra", "id": 5})
+        assert receive_until(agent, "agent_prompt") == {"type": "agent_prompt", "text": "wave", "mode": "tools",
+                                                        "model": "openai:gpt-6-astra"}

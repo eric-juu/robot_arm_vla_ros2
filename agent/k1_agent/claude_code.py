@@ -75,12 +75,15 @@ def operating_rules() -> str:
 
 def parse_result(text: str) -> tuple[bool, str]:
     """Success and summary from the final message's `RESULT: success|failed ...` line."""
-    for line in reversed((text or "").strip().splitlines()):
-        line = line.strip().strip("`*")
+    lines = (text or "").strip().splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip().strip("`*")
         if line.upper().startswith(RESULT_PREFIX):
             rest = line[len(RESULT_PREFIX):].strip()
             word, _, summary = rest.partition(" ")
-            return word.lower().strip(".,:;") == "success", summary.strip(" -:.") or rest
+            # the sentence may be on the line(s) after the RESULT line
+            summary = summary.strip(" -:.") or " ".join(s.strip() for s in lines[i + 1:] if s.strip())
+            return word.lower().strip(".,:;") == "success", summary or rest
     return False, (text or "").strip()[-300:] or "Claude Code gave no result"
 
 
@@ -89,6 +92,7 @@ class ClaudeCodeRunner:
     `command` is the CLI's name, or a full argument list to launch it with."""
 
     name = "claude-code"
+    label = "Claude Code"
 
     def __init__(self, client: K1Client, trace: Trace, url: str, config_path: str | None = None,
                  mcp_args: list[str] | None = None, model: str | None = None, command: str = "claude",
@@ -106,6 +110,7 @@ class ClaudeCodeRunner:
         self.usage: Usage | None = None
         self.cost_usd: float | None = None      # Claude Code's own estimate, at API prices
         self.turns = 0
+        self.error: str | None = None           # an error the CLI reported in its event stream
 
     def mcp_config(self) -> str:
         args = ["-m", "k1_agent.cli", "--url", self.url]
@@ -206,8 +211,8 @@ class ClaudeCodeRunner:
         elif ended == ["timeout"]:
             result = RunResult(False, f"no result after {self.timeout:.0f} s", "timeout", self.trace.dir)
         elif final is None:
-            detail = "".join(stderr_lines).strip()[-500:] or f"exit code {proc.returncode}"
-            result = RunResult(False, f"Claude Code failed: {detail}", "error", self.trace.dir)
+            detail = self.error or "".join(stderr_lines).strip()[-500:] or f"exit code {proc.returncode}"
+            result = RunResult(False, f"{self.label} failed: {detail}", "error", self.trace.dir)
         else:
             success, summary = parse_result(final)
             result = RunResult(success, summary, "done", self.trace.dir)

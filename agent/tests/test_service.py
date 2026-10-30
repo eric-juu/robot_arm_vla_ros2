@@ -4,10 +4,13 @@ import textwrap
 import threading
 import time
 
+import pytest
 from websockets.sync.client import connect
 
 from k1_agent.claude_code import ClaudeCodeRunner, parse_result
 from k1_agent.client import K1Client
+from k1_agent.codex import CodexRunner
+from k1_agent.pricing import Pricing
 from k1_agent.primitives import Primitives
 from k1_agent.providers.base import Provider, Reply, ToolCall
 from k1_agent.runner import AgentRunner
@@ -112,6 +115,38 @@ def test_stop_before_a_task_does_not_cancel_the_next_one(live_server):
     page.ws.close()
 
 
+def test_the_page_picks_the_model(live_server):
+    page = Page(live_server)
+    with K1Client(live_server["url"], live_server["token"]) as k1:
+        seen = []
+
+        def runner(label):
+            def run_task(text, mode, operator):
+                seen.append((label, text))
+                time.sleep(0.3)         # long enough for the page to see the "running" status
+            return run_task, {"provider": label.split(":")[0], "model": label.split(":")[1], "allow_motion": False}
+
+        choices = {label: runner(label) for label in ("claude-code:claude-opus-5-5", "openai:gpt-6-astra")}
+        service = AgentService(k1, *choices["claude-code:claude-opus-5-5"], choices=choices)
+        thread = threading.Thread(target=service.serve_forever, kwargs={"max_tasks": 2}, daemon=True)
+        thread.start()
+
+        status = page.agent_state("idle")["agent"]
+        assert status["models"] == ["claude-code:claude-opus-5-5", "openai:gpt-6-astra"]
+        assert (status["provider"], status["model"]) == ("claude-code", "claude-opus-5-5")
+        page.send({"type": "agent_prompt", "text": "wave", "model": "openai:gpt-9", "id": "bad"})
+        assert "must be one of" in page.receive(lambda m: m.get("id") == "bad")["message"]
+
+        page.send({"type": "agent_prompt", "text": "wave", "model": "openai:gpt-6-astra"})
+        running = page.agent_state("running")["agent"]
+        assert (running["provider"], running["model"]) == ("openai", "gpt-6-astra")
+        page.agent_state("idle")
+        page.send({"type": "agent_prompt", "text": "nod"})     # no model: the default
+        thread.join(timeout=10)
+        assert seen == [("openai:gpt-6-astra", "wave"), ("claude-code:claude-opus-5-5", "nod")]
+    page.ws.close()
+
+
 FAKE_CLAUDE = textwrap.dedent("""
     import json, os, sys, time
     with open(os.environ["FAKE_CLAUDE_LOG"], "w") as f:
@@ -180,3 +215,83 @@ def test_parse_result():
     assert parse_result("ok\nRESULT: success - picked it up") == (True, "picked it up")
     assert parse_result("**RESULT: failed** the cup fell")[0] is False
     assert parse_result("I could not see the cup.") == (False, "I could not see the cup.")
+    assert parse_result("RESULT: failed\nThe camera showed nothing.") == (False, "The camera showed nothing.")
+
+
+FAKE_CODEX = textwrap.dedent("""
+    import json, os, sys, time
+    with open(os.environ["FAKE_CODEX_LOG"], "w") as f:
+        json.dump({"argv": sys.argv[1:], "token": os.environ.get("K1_WEB_TOKEN"),
+                   "api_key": os.environ.get("OPENAI_API_KEY")}, f)
+    if "sleep" in sys.argv[-1]:
+        time.sleep(60)
+    item = {"id": "i1", "type": "mcp_tool_call", "server": "k1", "tool": "observe", "arguments": {}}
+    events = [
+        {"type": "thread.started", "thread_id": "th1"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "i0", "type": "agent_message", "text": "Looking first."}},
+        {"type": "item.started", "item": dict(item, status="in_progress")},
+        {"type": "item.completed", "item": dict(item, status="completed")},
+        {"type": "item.completed", "item": {"id": "i2", "type": "file_change", "status": "failed"}},
+        {"type": "item.completed", "item": {"id": "i3", "type": "agent_message",
+                                            "text": "The base is turned.\\nRESULT: success - turned the base left"}},
+        {"type": "turn.completed", "usage": {"input_tokens": 3000, "cached_input_tokens": 1000, "output_tokens": 100,
+                                             "reasoning_output_tokens": 20}},
+    ]
+    for event in events:
+        print(json.dumps(event), flush=True)
+""")
+
+
+def make_codex_runner(live_server, tmp_path, k1, monkeypatch):
+    script = tmp_path / "fake_codex.py"
+    script.write_text(FAKE_CODEX)
+    monkeypatch.setenv("FAKE_CODEX_LOG", str(tmp_path / "codex_args.json"))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-be-passed")
+    pricing = Pricing({"gpt-test": {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 0.0}})
+    return CodexRunner(k1, Trace(live_server["runs"], "codex"), live_server["url"], None,
+                       ["--allow-motion", "--max-steps", "5"], model="gpt-test",
+                       command=[sys.executable, str(script)], pricing=pricing)
+
+
+def test_codex_runner(live_server, tmp_path, monkeypatch):
+    page = Page(live_server)
+    with K1Client(live_server["url"], live_server["token"]) as k1:
+        runner = make_codex_runner(live_server, tmp_path, k1, monkeypatch)
+        result = runner.run("turn the base left")
+        assert (result.success, result.reason, result.summary) == (True, "done", "turned the base left")
+        # 2000 uncached + 1000 cached input, 100 output, at the test prices
+        assert result.cost_usd == pytest.approx((2000 * 10 + 1000 * 1 + 100 * 50) / 1e6)
+
+        seen = json.loads((tmp_path / "codex_args.json").read_text())
+        argv = seen["argv"]
+        assert seen["token"] == live_server["token"] and seen["api_key"] is None
+        assert argv[:2] == ["exec", "--json"] and argv[argv.index("-m") + 1] == "gpt-test"
+        assert argv[argv.index("-s") + 1] == "read-only" and 'approval_policy="never"' in argv
+        assert {"shell_tool", "unified_exec", "multi_agent"} <= {argv[i + 1] for i, a in enumerate(argv)
+                                                                 if a == "--disable"}
+        overrides = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "-c")
+        assert overrides["mcp_servers.k1.default_tools_approval_mode"] == '"approve"'
+        assert json.loads(overrides["mcp_servers.k1.args"])[-4:] == ["--web-operator", "--allow-motion",
+                                                                    "--max-steps", "5"]
+        assert "RESULT:" in argv[-1] and argv[-1].endswith("Task for the K1 arm: turn the base left")
+
+        notes = [page.receive(lambda m: m["type"] == "agent_note")["text"] for _ in range(4)]
+        assert notes[:3] == ["Looking first.", "-> observe({})", "The base is turned.\nRESULT: success - turned the base left"]
+        assert notes[3].startswith("SUCCESS")
+        entries = [json.loads(line) for line in open(runner.trace.path)]
+        assert {"task", "codex_init", "llm", "tool_call", "codex_item", "codex_result", "outcome"} <= {
+            e["kind"] for e in entries}
+        assert next(e for e in entries if e["kind"] == "codex_item")["item"]["type"] == "file_change"
+    page.ws.close()
+
+
+def test_codex_runner_ends_on_stop(live_server, tmp_path, monkeypatch):
+    page = Page(live_server)
+    with K1Client(live_server["url"], live_server["token"]) as k1:
+        runner = make_codex_runner(live_server, tmp_path, k1, monkeypatch)
+        threading.Timer(1.0, lambda: page.send({"type": "stop"})).start()
+        start = time.monotonic()
+        result = runner.run("sleep forever")
+        assert result.reason == "stopped" and time.monotonic() - start < 10
+    page.ws.close()
