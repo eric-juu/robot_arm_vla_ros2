@@ -1,6 +1,8 @@
 import pytest
 
-from k1_examples.move import parse_positions
+pytest.importorskip("rclpy")     # k1_examples is a ROS package: these tests run under ROS
+
+from k1_examples.move import parse_positions  # noqa: E402
 
 
 def test_six_numbers():

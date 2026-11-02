@@ -11,6 +11,8 @@ setup(
         ("share/" + package_name, ["package.xml"]),
     ],
     install_requires=["setuptools"],
+    # outside ROS: pip install -e "ros2/unitree_k1_sdk[standalone]" (colcon ignores extras)
+    extras_require={"standalone": ["pyserial", "numpy", "tqdm"]},
     zip_safe=True,
     maintainer="Jason Tang",
     maintainer_email="jason.tang@berkeley.edu",
