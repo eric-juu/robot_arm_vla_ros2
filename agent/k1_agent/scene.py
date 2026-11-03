@@ -150,6 +150,7 @@ class Scene:
             obj.setdefault("presses", 0)
             self.objects.append(obj)
         self.held: dict | None = None           # {"name", "offset"} while a block is in the gripper
+        self.regrasp_needs_open = False         # after a slip, the gripper must open before it can grasp again
         self.version = 0                        # bumps when anything visible changes
 
     @classmethod
@@ -209,7 +210,9 @@ class Scene:
                     self.version += 1
                 obj["_down"] = inside
         grasp = frames["grasp"]
-        if self.held is None and gripper < 0.5:
+        if gripper > 0.6:
+            self.regrasp_needs_open = False
+        if self.held is None and gripper < 0.5 and not self.regrasp_needs_open:
             for obj in self.objects:
                 if obj["kind"] == "block":
                     local = apply(transpose(grasp.r), [a - b for a, b in zip(self.center(obj), grasp.t)])
@@ -229,9 +232,11 @@ class Scene:
             self.version += 1
 
     def drop(self):
+        """The held block slips out and falls to the table (it can be grasped again once the gripper opens)."""
         if self.held is not None:
             self.get(self.held["name"])["xyz"][2] = 0.0
             self.held = None
+            self.regrasp_needs_open = True
             self.version += 1
 
     def gripper_stop(self, command: float) -> float:

@@ -134,20 +134,26 @@ class Toolbox:
         """Validate and run one tool call. Returns (result, camera frame or None). Never raises for a bad call:
         the model gets a typed error it can react to (StoppedByOperator still propagates)."""
         if name not in self.all_tools():
-            return fail("unknown_tool", f"no tool {name!r}; tools: {self.available()}"), None
+            return self._refuse(name, fail("unknown_tool", f"no tool {name!r}; tools: {self.available()}"))
         if name not in self.available():
-            return fail("unavailable", f"{name} isn't available in this session (profile {self.profile})"), None
+            return self._refuse(name, fail("unavailable", f"{name} isn't available in this session "
+                                                          f"(profile {self.profile})"))
         method = getattr(self, name)
         try:
             parsed = _arg_model(getattr(type(self), name)).model_validate(arguments or {})
         except ValidationError as e:
             errors = "; ".join(f"{'.'.join(str(x) for x in err['loc']) or 'arguments'}: {err['msg']}"
                                for err in e.errors()[:5])
-            return fail("bad_arguments", errors), None
+            return self._refuse(name, fail("bad_arguments", errors))
         result = method(**{k: getattr(parsed, k) for k in type(parsed).model_fields})
         if not isinstance(result, dict):
             result = {"ok": True, "result": result}
         return result, self.frame_for(name, result)
+
+    def _refuse(self, name: str, result: dict) -> tuple[dict, None]:
+        if self.trace is not None:      # refusals before a primitive runs are traced too (the eval's audit)
+            self.trace.log("tool_error", name=name, error=result["error"], message=result["message"])
+        return result, None
 
     def frame_for(self, name: str, result: dict) -> bytes | None:
         return result.pop("image", None) if isinstance(result, dict) else None

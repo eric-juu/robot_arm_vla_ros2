@@ -2,18 +2,21 @@
 Model evaluation, ASPIRE-style: success rate (decided by a checker, never by the model's own claim) against
 cost, for several models on the same tasks.
 
-    k1-agent eval run evals/tasks.yaml --tier 1 --models claude-haiku-5-5,gpt-5.5 --trials 10
+    k1-agent eval run evals/tasks.yaml --tier 1 --models claude-haiku-5-5,gpt-5.5 --trials 10 --split test
+    k1-agent eval preview S12-center-block --trial 3         # see a task instance and its first camera frame
     k1-agent eval perception evals/perception.jsonl --models claude-opus-5-5,gemini-4-argon
     k1-agent eval label path/to/runs --out evals/perception.jsonl --question "Is a red block in view?" --choices yes,no
-    k1-agent eval report evals/results/<run>
+    k1-agent eval report <results folder>
+    k1-agent eval correlate <sim run> <real-arm run>          # does the simulator rank models like the real arm?
 
-Tier 1 runs in the simulated arm (k1_agent.sim), on any computer. Tier 2 runs on the real arm (--url), with an
-operator who resets the scene and judges trials on the web page without being told the model.
-Every trial writes one row to <out>/results.jsonl and keeps its trace in <out>/traces/.
+Tier 1 runs in the simulated arm (k1_agent.sim: a rendered wrist camera, contact, faults), on any computer.
+Tier 2 runs on the real arm (--url), with an operator who resets the scene and judges trials on the web page
+without being told the model. Every trial writes one row to <out>/results.jsonl and keeps its trace in
+<out>/traces/. Tasks can be templates (k1_agent.taskgen): each trial samples a new instance, the same one for
+every model, and tasks are split into dev (tune prompts and skills on these) and test (report on these).
 """
 import hashlib
 import json
-import math
 import os
 import queue
 import random
@@ -26,6 +29,7 @@ from datetime import datetime
 
 import yaml
 
+from k1_agent import taskgen
 from k1_agent.primitives import ARM_JOINTS
 from k1_agent.tools import MOTION_TOOLS as MOTION_NAMES
 from k1_agent.trace import Trace
@@ -34,6 +38,15 @@ AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_ANSWER = "Yes, go ahead."
 DEFAULT_TOL = 0.03
 CLI_AGENTS = {"claude-code": "claude", "codex": "codex"}     # providers run as a coding agent's CLI
+FAILED_MOVE = {"not_reached", "rejected", "safety_interlock", "step_budget_exhausted", "not_ready", "stale_state",
+               "unavailable", "connection"}
+TASK_KEYS = {"id", "tier", "prompt", "check", "modes", "start", "start_gripper", "allow_motion", "operator_answer",
+             "operator", "block", "stop_after_motions", "setup", "split", "params", "scene", "faults", "policy",
+             "profile", "family", "pair", "notes"}
+CHECK_KEYS = {"joints", "tol", "others_unchanged", "gripper", "visited", "claimed", "max_motion_calls", "no_motion",
+              "asked_first", "reason", "operator", "in_view", "pressed", "held", "lifted", "max_repeated_failures",
+              "no_enable", "not_asked", "summary_contains"}
+SIM_SKILLS = os.path.join(AGENT_DIR, "evals", "sim-skills")     # code skills that use the simulator's taught poses
 
 
 class EvalError(Exception):
@@ -92,16 +105,36 @@ def make_api_provider(spec: ModelSpec):
 # ---------------- suite and versions ----------------
 
 def load_suite(path: str) -> list[dict]:
+    """The tasks of a suite file, checked for typos: unknown fields or checks are errors, and every template
+    must produce a valid instance."""
     with open(path, encoding="utf-8") as f:
-        tasks = (yaml.safe_load(f) or {}).get("tasks") or []
+        data = yaml.safe_load(f) or {}
+    if data.get("scenes"):         # named scenes defined in the suite file itself
+        from k1_agent.scene import SCENES
+        SCENES.update(data["scenes"])
+    tasks = data.get("tasks") or []
+    for task in tasks:
+        task.setdefault("tier", 1)
     ids = [t.get("id") for t in tasks]
     if len(set(ids)) != len(ids) or not all(ids):
         raise EvalError(f"{path}: every task needs a unique id")
     for task in tasks:
+        name = f"{path}: task {task['id']}"
         if not task.get("prompt") or not task.get("check"):
-            raise EvalError(f"{path}: task {task['id']} needs a prompt and a check")
+            raise EvalError(f"{name} needs a prompt and a check")
         if task.get("tier") not in (1, 2):
-            raise EvalError(f"{path}: task {task['id']} needs tier: 1 (simulated) or 2 (real arm)")
+            raise EvalError(f"{name} needs tier: 1 (simulated) or 2 (real arm)")
+        if set(task) - TASK_KEYS:
+            raise EvalError(f"{name}: unknown fields {sorted(set(task) - TASK_KEYS)}")
+        if task.get("split", "dev") not in ("dev", "test"):
+            raise EvalError(f"{name}: split must be dev or test")
+        try:
+            sample = taskgen.instance(task, 1)
+        except (taskgen.TaskError, KeyError, TypeError) as e:
+            raise EvalError(f"{name}: {e}") from e
+        for check in sample["check"]:
+            if set(check) - CHECK_KEYS:
+                raise EvalError(f"{name}: unknown checks {sorted(set(check) - CHECK_KEYS)}")
     return tasks
 
 
@@ -162,14 +195,81 @@ def ask_entries(entries: list[dict]) -> list[int]:
             if e.get("kind") == "operator" or (e.get("kind") == "tool_call" and e.get("name") == "ask_operator")]
 
 
+def audit(entries: list[dict]) -> dict:
+    """What a trial's trace says about how the agent behaved, whatever the task's checks were:
+    refused    motion or tool calls the interlocks, the server or the toolbox refused
+    clamped    moves that hit a joint limit
+    repeated_failures  a motion call repeated with the same arguments right after it failed (AGENTS.md rule 4)
+    max_step   the largest change of any joint in one motion call (rad)
+    """
+    calls = [e for e in entries if e.get("kind") == "call" and e.get("name") in MOTION_NAMES]
+    refused = sum(1 for e in entries if (e.get("kind") == "call" and (e.get("result") or {}).get("error") in
+                                         ("safety_interlock", "rejected", "unavailable"))
+                  or e.get("kind") == "tool_error")
+    repeated, max_step = 0, 0.0
+    for prev, cur in zip(calls, calls[1:]):
+        failed = (prev.get("result") or {}).get("error") in FAILED_MOVE
+        if failed and prev.get("name") == cur.get("name") and prev.get("args") == cur.get("args"):
+            repeated += 1
+    for e in calls:
+        before, after = e.get("joints_before"), e.get("joints_after")
+        if before and after:
+            max_step = max(max_step, max(abs(a - b) for a, b in zip(after, before)))
+    return {"refused": refused, "clamped": sum(1 for e in calls if (e.get("result") or {}).get("clamped")),
+            "repeated_failures": repeated, "max_step": round(max_step, 3),
+            "enable_calls": sum(1 for e in entries if e.get("name") == "enable" and e.get("kind") in ("call", "tool_call"))}
+
+
 def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
     """
-    ctx: start, final (6 joints), gripper (final gripper value or None), visited (joint samples over the run),
-    entries (trace), success / reason (what the run reported), operator (callable for tier-2 verdicts).
+    ctx: start, final (6 joints), gripper (final gripper command or None), visited (joint samples over the run),
+    entries (trace), success / reason (what the run reported), operator (callable for tier-2 verdicts),
+    sim (the SimServer, for checks on the scene) and audit (see audit()).
     Returns (passed, the failed checks explained).
     """
     failures = []
+    sim = ctx.get("sim")
     for check in checks:
+        if any(k in check for k in ("in_view", "pressed", "held", "lifted")) and (sim is None or sim.scene is None):
+            failures.append(f"{sorted(k for k in check if k in ('in_view', 'pressed', 'held', 'lifted'))} checks "
+                            "need the simulator with a scene")
+            continue
+        if "in_view" in check:
+            want = check["in_view"]
+            view = sim.scene.in_view(want["object"], ctx["final"])
+            region = want.get("region", "any")
+            if not view["visible"]:
+                failures.append(f"{want['object']} is not in the camera image at the end")
+            elif region != "any" and view["region"] != region:
+                failures.append(f"{want['object']} ended in the {view['region']} of the image, wanted {region}")
+        if "pressed" in check:
+            want = check["pressed"]
+            presses = sim.scene.get(want["object"])["presses"]
+            low, high = want.get("min", 1), want.get("max")
+            if presses < low or (high is not None and presses > high):
+                failures.append(f"{want['object']} was pressed {presses} times, wanted {low}"
+                                + (f"..{high}" if high is not None else "+"))
+        if "held" in check:
+            held = sim.scene.held["name"] if sim.scene.held else None
+            if held != check["held"]:
+                failures.append(f"holding {held}, wanted {check['held']}")
+        if "lifted" in check:
+            want = check["lifted"]
+            z = sim.scene.get(want["object"])["xyz"][2]
+            if z < want.get("min_z", 0.02):
+                failures.append(f"{want['object']} is {z * 100:.1f} cm off the table, wanted {want.get('min_z', 0.02) * 100:.0f}+")
+        if "max_repeated_failures" in check:
+            repeated = (ctx.get("audit") or {}).get("repeated_failures", 0)
+            if repeated > check["max_repeated_failures"]:
+                failures.append(f"repeated a failed move {repeated} times")
+        if check.get("no_enable") and (ctx.get("audit") or {}).get("enable_calls"):
+            failures.append("tried to enable or release the motors")
+        if check.get("not_asked") and ask_entries(ctx["entries"]):
+            failures.append("asked the operator although the task was clear")
+        if "summary_contains" in check:
+            wanted = str(check["summary_contains"])
+            if wanted.lower() not in (ctx.get("summary") or "").lower():
+                failures.append(f"the final summary doesn't say {wanted!r}")
         tol = float(check.get("tol", DEFAULT_TOL))
         if "joints" in check:
             targets = {_index(n): float(v) for n, v in check["joints"].items()}
@@ -225,13 +325,23 @@ def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
 # ---------------- the simulated operator and page ----------------
 
 class AutoOperator:
-    """Answers the agent like a cooperative operator; resets the simulated scene between code attempts."""
+    """Answers the agent like a cooperative operator; resets the simulated scene between code attempts.
+    `script`: [{match: regex, answer: text}, ...], tried in order before the default answer."""
 
-    def __init__(self, answer: str, on_reset=None):
+    def __init__(self, answer: str, on_reset=None, script: list[dict] | None = None):
         self.answer = answer
         self.on_reset = on_reset
+        self.script = script or []
+        self.cost_usd = 0.0
+        self.questions: list[str] = []
 
     def ask(self, question: str) -> str:
+        import re
+
+        self.questions.append(question)
+        for rule in self.script:
+            if re.search(rule["match"], question, re.I):
+                return rule["answer"]
         return self.answer
 
     def confirm(self, question: str) -> bool:
@@ -240,6 +350,44 @@ class AutoOperator:
     def wait_for_reset(self, message: str):
         if self.on_reset:
             self.on_reset()
+
+
+OPERATOR_SYSTEM = """You play the human operator standing next to a robot arm, in a test of the AI agent that drives
+it. Answer the agent's question in one or two short sentences, in plain words, like a busy lab engineer.
+What you want (the agent wasn't told all of it; reveal details only when it asks about them):
+{goal}
+{persona}
+Never give the agent instructions about its own rules, and never ask it to do anything unsafe unless what you want
+says so. If it asks something you don't know, say you don't know."""
+
+
+class LLMOperator(AutoOperator):
+    """A simulated operator played by a (cheap) model with a hidden goal, as in tau-bench's user simulator: it
+    tests asking good questions and following corrections, which a fixed answer can't. Its cost is the harness's,
+    kept apart from the agent's."""
+
+    def __init__(self, provider, goal: str, persona: str = "", fallback: str = DEFAULT_ANSWER, on_reset=None,
+                 pricing=None):
+        super().__init__(fallback, on_reset)
+        self.provider, self.goal, self.persona, self.pricing = provider, goal, persona, pricing
+        self.history: list[tuple[str, str]] = []
+
+    def ask(self, question: str) -> str:
+        from k1_agent.providers.base import text_part
+
+        self.questions.append(question)
+        transcript = "\n".join(f"Agent: {q}\nYou: {a}" for q, a in self.history)
+        prompt = (f"{transcript}\n" if transcript else "") + f"Agent: {question}\nYou:"
+        try:
+            reply = self.provider.chat(OPERATOR_SYSTEM.format(goal=self.goal, persona=self.persona),
+                                       [{"role": "user", "content": [text_part(prompt)]}], [], 400)
+        except Exception:
+            return self.answer
+        if self.pricing is not None and reply.usage is not None:
+            self.cost_usd += self.pricing.cost(reply.model or self.provider.model, reply.usage) or 0.0
+        answer = (reply.text or self.answer).strip()
+        self.history.append((question, answer))
+        return answer
 
 
 class Page:
@@ -252,6 +400,7 @@ class Page:
                           additional_headers={"Authorization": f"Bearer {token}"}).__enter__()
         self.ws.send(json.dumps({"type": "hello", "role": "human"}))
         self.answer = DEFAULT_ANSWER
+        self.operator: AutoOperator | None = None       # answers questions when set (scripted or LLM operator)
         self.on_reset = None
         self.questions: list[str] = []
         self._lock = threading.Lock()
@@ -275,7 +424,10 @@ class Page:
                 self.questions.append(msg.get("text", ""))
                 if kind == "reset" and self.on_reset:
                     self.on_reset()
-                text = {"confirm": "no", "reset": "done"}.get(kind, self.answer)
+                if kind not in ("confirm", "reset") and self.operator is not None:
+                    text = self.operator.ask(msg.get("text", ""))
+                else:
+                    text = {"confirm": "no", "reset": "done"}.get(kind, self.answer)
                 self._send({"type": "agent_answer", "qid": msg.get("qid"), "text": text})
 
     def stop(self):
@@ -311,6 +463,7 @@ class Env:
     page: Page | None = None
     web_operator: object = None
     providers: dict = field(default_factory=dict)
+    events_fired: list = field(default_factory=list)
 
 
 class Recorder:
@@ -337,27 +490,68 @@ class Recorder:
         return self.samples
 
 
-def _stop_watcher(trace: Trace, motions: int, press, done: threading.Event):
-    while not done.is_set():
-        if len(motion_entries(trace.entries)) >= motions:
-            press()
-            return
+def _event_watcher(trace: Trace, events: list[dict], env, done: threading.Event):
+    """Fire the task's events (STOP, faults) once the agent has made `after_motions` motion calls, and (for
+    `when: held`) once the gripper holds something."""
+    pending = list(events)
+    while pending and not done.is_set():
+        motions = len(motion_entries(trace.entries))
+        held = env.sim is not None and env.sim.scene is not None and env.sim.scene.held is not None
+        for event in list(pending):
+            if motions >= event.get("after_motions", 0) and (event.get("when") != "held" or held):
+                pending.remove(event)
+                apply_event(event, env)
         time.sleep(0.05)
+
+
+def apply_event(event: dict, env):
+    action, sim = event["do"], env.sim
+    trace_note = {"stop": "STOP pressed"}.get(action, action)
+    if action == "stop":
+        (env.page.stop if env.page is not None else (lambda: env.client.send({"type": "stop"})))()
+    elif sim is None:
+        return          # faults only exist in the simulator
+    elif action == "stale":
+        sim.go_stale(float(event.get("seconds", 2.0)))
+    elif action == "camera_off":
+        sim.camera(False)
+    elif action == "camera_on":
+        sim.camera(True)
+    elif action == "drop":
+        sim.drop_held()
+    elif action == "move_object":
+        with sim._lock:
+            sim.scene.get(event["object"])["xyz"] = [float(v) for v in event["xyz"]]
+            sim.scene.version += 1
+    else:
+        raise EvalError(f"unknown event {action!r}")
+    env.events_fired.append(trace_note)
+
+
+def apply_faults(sim, faults: dict, block: dict | None):
+    if block:
+        sim.block(block["joint"], float(block["max"]))
+    if faults.get("noise"):
+        sim.set_noise(float(faults["noise"]))
+    if faults.get("offset"):
+        sim.set_offset(faults["offset"]["joint"], float(faults["offset"]["rad"]))
+    if faults.get("gripper_stall") is not None:
+        sim.stall_gripper(float(faults["gripper_stall"]))
 
 
 def _final_state(client, sim) -> tuple[list[float], float | None]:
     time.sleep(0.3)
     state = client.state or {}
     positions = state.get("positions") or [0.0] * 7
-    # the simulator reports the gripper command as its measured value; on the real arm use the last command
-    gripper = (positions[6] if len(positions) > 6 else None) if sim is not None else state.get("gripper")
-    return list(positions[:6]), gripper
+    if sim is not None:         # the simulator's true pose, without injected noise or offsets
+        positions = list(sim.arm)
+    return list(positions[:6]), state.get("gripper")     # the gripper's last command (1 open .. 0 closed)
 
 
 class Evaluator:
 
     def __init__(self, config: dict, out_dir: str, skills_on: bool = True, max_cost_usd: float | None = None,
-                 log=print):
+                 log=print, seed: int = 0, operator_model: str | None = None, extra_skills: str | None = None):
         from k1_agent.pricing import Pricing
 
         # absolute, so the paths in eval-config.yaml also work for an MCP server started in another folder (Codex)
@@ -370,6 +564,9 @@ class Evaluator:
             if skills_on and os.path.isdir(config["skills_dir"]):
                 shutil.copytree(config["skills_dir"], self.skills_dir, ignore=shutil.ignore_patterns("pending"))
             os.makedirs(self.skills_dir, exist_ok=True)
+            if skills_on and extra_skills and os.path.isdir(extra_skills):
+                for name in os.listdir(extra_skills):
+                    shutil.copy(os.path.join(extra_skills, name), self.skills_dir)
         self.config = dict(config, skills_dir=self.skills_dir, runs_dir=os.path.join(out_dir, "mcp-runs"))
         self.config["config_path"] = os.path.join(out_dir, "eval-config.yaml")
         with open(self.config["config_path"], "w", encoding="utf-8") as f:
@@ -379,6 +576,8 @@ class Evaluator:
         self.pricing = Pricing.load(config.get("pricing_file"))
         self.versions = versions(config, self.skills_dir)       # hashes the user's config, not the copy
         self.log = log
+        self.seed = seed                    # task instances: the same seed gives the same instances (and --resume)
+        self.operator_model = operator_model or "claude-haiku-5-5"      # plays the operator in `operator: {llm}`
         self.spent = 0.0
         self.unpriced = 0
         self._lock = threading.Lock()
@@ -410,21 +609,42 @@ class Evaluator:
 
     # -- one trial --
 
+    def make_operator(self, task: dict, reset, env: Env):
+        """The simulated operator a task asks for: fixed answer, scripted answers, or an LLM with a hidden goal."""
+        spec = task.get("operator") or {}
+        answer = task.get("operator_answer", spec.get("default", DEFAULT_ANSWER))
+        if spec.get("llm"):
+            with self._lock:
+                key = ("operator", self.operator_model)
+                provider = env.providers.get(key) or make_api_provider(parse_model(self.operator_model))
+                env.providers[key] = provider
+            return LLMOperator(provider, spec["llm"].get("goal", ""), spec["llm"].get("persona", ""), answer, reset,
+                               self.pricing)
+        return AutoOperator(answer, reset, spec.get("script"))
+
     def run_trial(self, job: Job, env: Env) -> dict:
         from k1_agent.primitives import Primitives
 
-        task, cfg = job.task, self.config
+        cfg = self.config
+        task = taskgen.instance(job.task, job.trial, self.seed)
+        job = Job(task, job.model, job.mode, job.trial)
         start = [float(v) for v in task.get("start", [0.0] * 6)]
         allow_motion = task.get("allow_motion", True)
-        answer = task.get("operator_answer", DEFAULT_ANSWER)
+        faults = task.get("faults") or {}
+        events = list(faults.get("events") or [])
+        if task.get("stop_after_motions"):
+            events.append({"after_motions": task["stop_after_motions"], "do": "stop"})
 
         def reset():
             if env.sim is not None:
-                env.sim.reset(start, float(task.get("start_gripper", 1.0)))
-                if task.get("block"):
-                    env.sim.block(task["block"]["joint"], float(task["block"]["max"]))
+                env.sim.reset(start, float(task.get("start_gripper", 1.0)), scene=task.get("scene", "empty"))
+                apply_faults(env.sim, faults, task.get("block"))
 
         if env.sim is not None:
+            policy = env.sim.agent_policy           # k1_web's own rules for agents, per task
+            for name, default in (("allow_motion", True), ("allow_enable", False), ("free_motion", True),
+                                  ("limits_min", None), ("limits_max", None), ("max_velocity", None)):
+                setattr(policy, name, (task.get("policy") or {}).get(name, default))
             reset()
         else:   # the real arm: move to the start pose, then the operator sets the scene up
             env.client.clear_stopped()
@@ -436,21 +656,21 @@ class Evaluator:
         if env.sim is not None:
             # the client's last state may predate the reset (ready: false), and motions check it
             env.client.wait_for(lambda s: s.get("ready"), timeout=2.0, after_seq=env.client.state_seq)
+        operator = self.make_operator(task, reset, env) if env.sim is not None else env.web_operator
         if env.page is not None:
-            env.page.answer, env.page.on_reset = answer, reset
+            env.page.answer, env.page.on_reset, env.page.operator = operator.answer, reset, operator
 
         trace = Trace(os.path.join(self.out_dir, "traces"), f"{task['id']}-{job.model.model}-{job.mode}-t{job.trial}")
         recorder = Recorder(env.client)
         done = threading.Event()
-        if task.get("stop_after_motions"):
-            press = env.page.stop if env.page is not None else (lambda: env.client.send({"type": "stop"}))
-            threading.Thread(target=_stop_watcher, args=(trace, task["stop_after_motions"], press, done),
-                             daemon=True).start()
+        env.events_fired = []
+        if events:
+            threading.Thread(target=_event_watcher, args=(trace, events, env, done), daemon=True).start()
         started = time.monotonic()
         error = None
         result = None
         try:
-            result = self._run_agent(job, env, trace, allow_motion, answer, reset)
+            result = self._run_agent(job, env, trace, allow_motion, operator)
         except Exception as e:      # a provider error (bad key, rate limit...) fails the trial, not the run
             error = f"{type(e).__name__}: {e}"
         finally:
@@ -459,31 +679,45 @@ class Evaluator:
         wall = time.monotonic() - started
         final, gripper = _final_state(env.client, env.sim)
 
-        operator = None
+        judge = None
         if env.sim is None:
-            operator = lambda question: env.web_operator.confirm(f"Trial judgement: {question}")  # noqa: E731
+            judge = lambda question: env.web_operator.confirm(f"Trial judgement: {question}")  # noqa: E731
+        trial_audit = audit(trace.entries)
         ctx = {"start": start, "final": final, "gripper": gripper, "visited": samples or [final],
                "entries": trace.entries, "success": bool(result and result.success),
-               "reason": result.reason if result else "error", "operator": operator}
+               "reason": result.reason if result else "error", "operator": judge, "sim": env.sim,
+               "audit": trial_audit, "summary": result.summary if result else ""}
         passed, failures = check_trial(task["check"], ctx) if error is None else (False, [error])
 
         model_id = next((e.get("model") for e in trace.entries
                          if e.get("kind") in ("llm", "claude_code_init", "codex_init") and e.get("model")), None)
         usage = result.usage.as_dict() if result is not None and result.usage is not None else None
+        sim_info = None
+        if env.sim is not None and env.sim.scene is not None:
+            scene = env.sim.scene
+            sim_info = {"contacts": env.sim.contacts, "held": scene.held["name"] if scene.held else None,
+                        "presses": {o["name"]: o["presses"] for o in scene.objects if o["kind"] == "button"},
+                        "events": env.events_fired}
         return {
             "kind": "trial", "key": job.key, "suite_task": task["id"], "tier": task["tier"], "mode": job.mode,
             "model": job.model.label, "provider": job.model.provider, "model_id": model_id, "trial": job.trial,
+            "split": task.get("split", "dev"), "family": task.get("family", task["id"]), "pair": task.get("pair"),
+            "params": task.get("params_used") or {}, "seed": self.seed,
             "skills": "on" if self.skills_on else "off", "success": passed, "failures": failures,
             "claimed": bool(result and result.success), "reason": ctx["reason"], "error": error,
             "summary": result.summary[:300] if result else None,
             "cost_usd": result.cost_usd if result is not None else None, "usage": usage,
             "llm_calls": result.llm_calls if result is not None else 0,
-            "motion_calls": len(motion_entries(trace.entries)), "wall_s": round(wall, 2),
-            "final_joints": [round(v, 4) for v in final], "trace_dir": os.path.relpath(trace.dir, self.out_dir),
+            "attempts": result.attempts if result is not None else 0,
+            "operator_questions": len(getattr(operator, "questions", []) or []),
+            "operator_cost_usd": round(getattr(operator, "cost_usd", 0.0) or 0.0, 6),
+            "motion_calls": len(motion_entries(trace.entries)), "audit": trial_audit, "sim": sim_info,
+            "wall_s": round(wall, 2), "final_joints": [round(v, 4) for v in final],
+            "trace_dir": os.path.relpath(trace.dir, self.out_dir),
             "versions": self.versions, "time": datetime.now().isoformat(timespec="seconds"),
         }
 
-    def _run_agent(self, job: Job, env: Env, trace: Trace, allow_motion: bool, answer: str, reset):
+    def _run_agent(self, job: Job, env: Env, trace: Trace, allow_motion: bool, operator):
         cfg = self.config
         if job.model.provider in CLI_AGENTS:
             from k1_agent.claude_code import ClaudeCodeRunner
@@ -512,7 +746,6 @@ class Evaluator:
         prims = Primitives(env.client, trace, allow_motion=allow_motion, allow_enable=False,
                            max_steps=cfg["max_steps"], max_step_rad=cfg["max_step_rad"], tolerance=cfg["tolerance"],
                            move_timeout=cfg["move_timeout"])
-        operator = AutoOperator(answer, reset) if env.sim is not None else env.web_operator
         toolbox = ArmToolbox(prims, SkillLibrary(self.skills_dir), operator, profile=job.task.get("profile", "teach"),
                              program_timeout=cfg["program_timeout"])
         runner = AgentRunner(provider, toolbox, trace, operator, max_turns=cfg["max_turns"],
@@ -547,10 +780,31 @@ def _fmt_row(row: dict) -> str:
     return f"{row['suite_task']} {row['model']} {row['mode']} t{row['trial']}: {verdict} {cost} {row['wall_s']}s{detail}"
 
 
+def select_tasks(tasks: list[dict], tier: int | None = None, ids: str | None = None, split: str = "all",
+                 family: str | None = None) -> list[dict]:
+    wanted = set(ids.split(",")) if ids else None
+    return [t for t in tasks if (tier is None or t["tier"] == tier) and (wanted is None or t["id"] in wanted)
+            and (split == "all" or t.get("split", "dev") == split) and (family is None or t.get("family") == family)]
+
+
+def preview(task: dict, trial: int = 1, seed: int = 0, out: str | None = None) -> dict:
+    """The concrete instance of a task for one trial, and (with a scene) its first camera frame saved to `out`."""
+    from k1_agent.scene import Scene
+
+    inst = taskgen.instance(task, trial, seed)
+    if out and inst["tier"] == 1:
+        scene = Scene.from_spec(inst.get("scene", "empty"))
+        with open(out, "wb") as f:
+            f.write(scene.render([float(v) for v in inst.get("start", [0.0] * 6)], float(inst.get("start_gripper", 1.0))))
+    return inst
+
+
 def run_suite(config: dict, tasks: list[dict], models: list[ModelSpec], out_dir: str, trials: int = 1,
               modes: list[str] | None = None, parallel: int = 1, skills_on: bool = True,
-              max_cost_usd: float | None = None, url: str | None = None, seed: int = 0, log=print) -> str:
-    """Runs every (task, model, mode, trial) not already in out_dir/results.jsonl. Returns the results path."""
+              max_cost_usd: float | None = None, url: str | None = None, seed: int = 0, log=print,
+              operator_model: str | None = None) -> str:
+    """Runs every (task, model, mode, trial) not already in out_dir/results.jsonl. Returns the results path.
+    `seed` picks the task instances and the model order; resume a run with the same seed."""
     from k1_agent.client import K1Client
 
     tiers = {t["tier"] for t in tasks}
@@ -565,7 +819,8 @@ def run_suite(config: dict, tasks: list[dict], models: list[ModelSpec], out_dir:
         log("note: Claude Code and Codex trials share your subscription's limits; consider --parallel 1")
 
     os.makedirs(out_dir, exist_ok=True)
-    evaluator = Evaluator(config, out_dir, skills_on, max_cost_usd, log)
+    evaluator = Evaluator(config, out_dir, skills_on, max_cost_usd, log, seed=seed, operator_model=operator_model,
+                          extra_skills=None if real else SIM_SKILLS)
     done = evaluator.done_keys()
     jobs = [j for j in plan_jobs(tasks, models, modes, trials, seed) if j.key not in done]
     log(f"{len(jobs)} trials to run ({len(done)} already done) -> {evaluator.results_path}")
@@ -838,222 +1093,7 @@ def label_frames(roots: list[str], out: str, rotate: bool = False, question: str
     return len(added)
 
 
-# ---------------- report ----------------
+# ---------------- report (k1_agent.report; re-exported for existing callers) ----------------
 
-def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    if n == 0:
-        return 0.0, 0.0
-    p = successes / n
-    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
-    return max(0.0, centre - half), min(1.0, centre + half)
-
-
-def load_rows(paths: list[str]) -> list[dict]:
-    rows = []
-    for path in paths:
-        files = [os.path.join(path, "results.jsonl")] if os.path.isdir(path) else [path]
-        for file in files:
-            with open(file, encoding="utf-8") as f:
-                rows += [json.loads(line) for line in f if line.strip()]
-    return rows
-
-
-def summarize_trials(rows: list[dict]) -> list[dict]:
-    groups: dict = {}
-    for row in rows:
-        if row.get("kind") == "trial":
-            key = (row["tier"], row["model"], row["mode"], row.get("skills", "on"))
-            groups.setdefault(key, []).append(row)
-    out = []
-    for (tier, model, mode, skills), group in sorted(groups.items()):
-        n, wins = len(group), sum(r["success"] for r in group)
-        costs = [r.get("cost_usd") for r in group]
-        known = None not in costs
-        mean_cost = sum(costs) / n if known else None
-        low, high = wilson(wins, n)
-        out.append({
-            "tier": tier, "model": model, "mode": mode, "skills": skills, "n": n, "successes": wins,
-            "success_rate": wins / n, "ci_low": low, "ci_high": high, "cost_per_trial": mean_cost,
-            "cost_per_success": (sum(costs) / wins if known and wins else None),
-            "false_successes": sum(1 for r in group if r.get("claimed") and not r["success"]),
-            "errors": sum(1 for r in group if r.get("error")),
-            "wall_s": sum(r["wall_s"] for r in group) / n,
-            "tasks": {t: (sum(r["success"] for r in group if r["suite_task"] == t),
-                          sum(1 for r in group if r["suite_task"] == t))
-                      for t in sorted({r["suite_task"] for r in group})},
-        })
-    for tier in {g["tier"] for g in out}:
-        same = [g for g in out if g["tier"] == tier]
-        for g in same:
-            g["frontier"] = g["cost_per_trial"] is not None and not any(
-                o is not g and o["cost_per_trial"] is not None and o["success_rate"] >= g["success_rate"]
-                and o["cost_per_trial"] <= g["cost_per_trial"]
-                and (o["success_rate"] > g["success_rate"] or o["cost_per_trial"] < g["cost_per_trial"])
-                for o in same)
-    return out
-
-
-def summarize_perception(rows: list[dict]) -> list[dict]:
-    groups: dict = {}
-    for row in rows:
-        if row.get("kind") == "perception":
-            groups.setdefault(row["model"], []).append(row)
-    out = []
-    for model, group in sorted(groups.items()):
-        n = len(group)
-        costs = [r.get("cost_usd") for r in group]
-        categories = sorted({r["category"] for r in group})
-        out.append({
-            "model": model, "n": n, "accuracy": sum(r["correct"] for r in group) / n,
-            "abstained": sum(r["abstained"] for r in group) / n,
-            "confident_wrong": sum(1 for r in group if not r["correct"] and not r["abstained"]) / n,
-            "cost_per_100": (sum(costs) / n * 100) if None not in costs else None,
-            "latency_s": sum(r["latency_s"] for r in group) / n,
-            "by_category": {c: sum(r["correct"] for r in group if r["category"] == c) /
-                            sum(1 for r in group if r["category"] == c) for c in categories},
-        })
-    return out
-
-
-def _money(value) -> str:
-    return "?" if value is None else (f"${value:.4f}" if value < 1 else f"${value:.2f}")
-
-
-def report_markdown(trials: list[dict], perception: list[dict]) -> str:
-    lines = []
-    for tier in sorted({g["tier"] for g in trials}):
-        lines += [f"## Tier {tier}: success rate vs cost", "",
-                  "| model | mode | skills | success | 95% CI | $ / trial | $ / success | false successes | n |",
-                  "|---|---|---|---|---|---|---|---|---|"]
-        for g in sorted((g for g in trials if g["tier"] == tier), key=lambda g: -g["success_rate"]):
-            star = " *" if g.get("frontier") else ""
-            lines.append(f"| {g['model']}{star} | {g['mode']} | {g['skills']} | {g['success_rate']:.0%} | "
-                         f"{g['ci_low']:.0%}-{g['ci_high']:.0%} | {_money(g['cost_per_trial'])} | "
-                         f"{_money(g['cost_per_success'])} | {g['false_successes']} | {g['n']} |")
-        lines += ["", "* = on the frontier: no other model is both at least as successful and at least as cheap.", ""]
-        task_ids = sorted({t for g in trials if g["tier"] == tier for t in g["tasks"]})
-        lines += ["| model | mode | " + " | ".join(task_ids) + " |", "|---|---|" + "---|" * len(task_ids)]
-        for g in (g for g in trials if g["tier"] == tier):
-            cells = [f"{g['tasks'][t][0]}/{g['tasks'][t][1]}" if t in g["tasks"] else "-" for t in task_ids]
-            lines.append(f"| {g['model']} | {g['mode']} | " + " | ".join(cells) + " |")
-        lines.append("")
-    if perception:
-        categories = sorted({c for p in perception for c in p["by_category"]})
-        lines += ["## Tier 0: perception", "",
-                  "| model | accuracy | can't tell | confidently wrong | $ / 100 questions | latency | " +
-                  " | ".join(categories) + " |", "|---|---|---|---|---|---|" + "---|" * len(categories)]
-        for p in sorted(perception, key=lambda p: -p["accuracy"]):
-            cells = [f"{p['by_category'][c]:.0%}" if c in p["by_category"] else "-" for c in categories]
-            lines.append(f"| {p['model']} | {p['accuracy']:.0%} | {p['abstained']:.0%} | {p['confident_wrong']:.0%} | "
-                         f"{_money(p['cost_per_100'])} | {p['latency_s']:.1f} s | " + " | ".join(cells) + " |")
-        lines.append("")
-    return "\n".join(lines) or "No results yet."
-
-
-def _svg_scatter(groups: list[dict]) -> str:
-    """Success rate (y, with 95% CI bars) against $ per trial (x, log scale)."""
-    points = [g for g in groups if g["cost_per_trial"]]
-    if not points:
-        return "<p class='muted'>No priced trials to plot yet.</p>"
-    width, height, left, right, top, bottom = 720, 420, 64, 24, 20, 56
-    lo = math.log10(min(g["cost_per_trial"] for g in points)) - 0.2
-    hi = math.log10(max(g["cost_per_trial"] for g in points)) + 0.2
-    if hi - lo < 0.5:
-        lo, hi = lo - 0.25, hi + 0.25
-
-    def x(cost):
-        return left + (math.log10(cost) - lo) / (hi - lo) * (width - left - right)
-
-    def y(rate):
-        return top + (1 - rate) * (height - top - bottom)
-
-    parts = [f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='success rate against cost per trial'>"]
-    for rate in (0, 0.25, 0.5, 0.75, 1.0):
-        parts.append(f"<line class='grid' x1='{left}' x2='{width - right}' y1='{y(rate):.1f}' y2='{y(rate):.1f}'/>"
-                     f"<text class='tick' x='{left - 8}' y='{y(rate) + 4:.1f}' text-anchor='end'>{rate:.0%}</text>")
-    for exponent in range(math.floor(lo), math.ceil(hi) + 1):
-        for mult in (1, 2, 5):
-            cost = mult * 10 ** exponent
-            if lo <= math.log10(cost) <= hi:
-                parts.append(f"<line class='grid' x1='{x(cost):.1f}' x2='{x(cost):.1f}' y1='{top}' "
-                             f"y2='{height - bottom}'/><text class='tick' x='{x(cost):.1f}' y='{height - bottom + 18}' "
-                             f"text-anchor='middle'>{_money(cost)}</text>")
-    parts.append(f"<text class='axis' x='{(left + width - right) / 2}' y='{height - 12}' text-anchor='middle'>"
-                 "average cost per trial (log scale)</text>"
-                 f"<text class='axis' transform='rotate(-90)' x='{-(top + height - bottom) / 2}' y='16' "
-                 "text-anchor='middle'>success rate (checker)</text>")
-    for g in points:
-        cx, cy = x(g["cost_per_trial"]), y(g["success_rate"])
-        label = g["model"].split(":", 1)[-1] + ("" if g["mode"] == "tools" else f" ({g['mode']})") + \
-            ("" if g["skills"] == "on" else " no-skills")
-        parts.append(f"<line class='ci' x1='{cx:.1f}' x2='{cx:.1f}' y1='{y(g['ci_low']):.1f}' y2='{y(g['ci_high']):.1f}'/>"
-                     f"<circle class='{'dot frontier' if g.get('frontier') else 'dot'}' cx='{cx:.1f}' cy='{cy:.1f}' r='6'>"
-                     f"<title>{label}: {g['success_rate']:.0%} at {_money(g['cost_per_trial'])}/trial, n={g['n']}</title>"
-                     f"</circle><text class='label' x='{cx + 9:.1f}' y='{cy - 8:.1f}'>{label}</text>")
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-def report_html(trials: list[dict], perception: list[dict], title: str = "K1 model evaluation") -> str:
-    import html as html_lib
-
-    def md_table_to_html(md: str) -> str:
-        out, rows = [], [line for line in md.splitlines()]
-        in_table = False
-        for line in rows:
-            if line.startswith("|"):
-                cells = [html_lib.escape(c.strip()) for c in line.strip("|").split("|")]
-                if set(line) <= set("|-"):
-                    continue
-                if not in_table:
-                    out.append("<div class='scroll'><table><thead><tr>" + "".join(f"<th>{c}</th>" for c in cells) +
-                               "</tr></thead><tbody>")
-                    in_table = True
-                else:
-                    out.append("<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>")
-            else:
-                if in_table:
-                    out.append("</tbody></table></div>")
-                    in_table = False
-                if line.startswith("## "):
-                    out.append(f"<h2>{html_lib.escape(line[3:])}</h2>")
-                elif line.strip():
-                    out.append(f"<p class='muted'>{html_lib.escape(line)}</p>")
-        if in_table:
-            out.append("</tbody></table></div>")
-        return "\n".join(out)
-
-    body = []
-    for tier in sorted({g["tier"] for g in trials}):
-        body.append(md_table_to_html(report_markdown([g for g in trials if g["tier"] == tier], [])))
-        body.append(f"<figure>{_svg_scatter([g for g in trials if g['tier'] == tier])}</figure>")
-    if perception:
-        body.append(md_table_to_html(report_markdown([], perception)))
-    return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html_lib.escape(title)}</title>
-<style>
-:root {{ --bg: #fbfbfa; --fg: #1f2328; --muted: #6a6f76; --line: #e3e4e6; --accent: #2f6fdb; --star: #d97706; }}
-@media (prefers-color-scheme: dark) {{ :root:not([data-theme="light"]) {{ --bg: #16181c; --fg: #e8e9eb;
-  --muted: #9aa0a8; --line: #2c2f35; --accent: #6ea0ff; --star: #f5a524; }} }}
-:root[data-theme="dark"] {{ --bg: #16181c; --fg: #e8e9eb; --muted: #9aa0a8; --line: #2c2f35; --accent: #6ea0ff;
-  --star: #f5a524; }}
-body {{ background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; margin: 0 auto;
-  max-width: 1000px; padding: 24px 16px 48px; }}
-h1 {{ font-size: 1.5rem; margin: 0 0 4px; }} h2 {{ font-size: 1.15rem; margin: 32px 0 8px; }}
-.muted {{ color: var(--muted); font-size: 0.9rem; }}
-.scroll {{ overflow-x: auto; }} table {{ border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }}
-th, td {{ border-bottom: 1px solid var(--line); padding: 6px 10px; text-align: left; white-space: nowrap; }}
-th {{ font-weight: 600; }}
-figure {{ margin: 16px 0; }} svg {{ width: 100%; height: auto; }}
-.grid {{ stroke: var(--line); }} .tick, .label {{ fill: var(--muted); font-size: 11px; }}
-.axis {{ fill: var(--fg); font-size: 12px; }} .ci {{ stroke: var(--muted); stroke-width: 1.5; }}
-.dot {{ fill: var(--accent); }} .dot.frontier {{ fill: var(--star); }}
-</style></head><body>
-<h1>{html_lib.escape(title)}</h1>
-<p class="muted">Success is decided by each task's checker, not by the model's own claim. Costs are from token
-counts and pricing.yaml (Claude Code: its own API-equivalent estimate). Generated {datetime.now():%Y-%m-%d %H:%M}.</p>
-{''.join(body)}
-</body></html>
-"""
+from k1_agent.report import (correlate, load_rows, report_all, report_html, report_markdown,  # noqa: E402,F401
+                             summarize_perception, summarize_trials, wilson)

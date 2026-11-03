@@ -33,7 +33,10 @@ K1_WEB_DIR = os.path.join(os.path.dirname(AGENT_DIR), "ros2", "k1_web")
 SIM_POSES = {"zero": {"joints": [0.0] * 6},
              "home": {"joints": [0.0] * 6, "gripper": 1.0},
              "ready": {"joints": [0.0, -0.3, 0.5, 0.0, -0.2, 0.0], "gripper": 1.0},
-             "overview": {"joints": [0.0, 0.2, -0.4, 0.0, -1.3, 0.0]}}      # looking straight down at the work area
+             "overview": {"joints": [0.0, 0.2, -0.4, 0.0, -1.3, 0.0]},      # looking straight down at the work area
+             # taught for the "bench" scene's reset button: fingers closed and pointing down, 5 cm above / pressing
+             "bench_above": {"joints": [0.1, -0.55, 0.25, 0.0, -1.4, 0.0], "gripper": 0.0},
+             "bench_press": {"joints": [0.1, -0.7, 0.25, 0.0, -1.4, 0.0], "gripper": 0.0}}
 # The simulated arm's limits: shoulder_pan as in k1_web.yaml's placeholder (some tasks rely on 1.0), the others
 # wide enough to look straight down at the table, inside the URDF's ranges.
 SIM_LIMITS = ([-1.0, -1.0, -1.4, -1.5, -1.6, -1.5], [1.0, 1.0, 1.4, 1.5, 1.6, 1.5])

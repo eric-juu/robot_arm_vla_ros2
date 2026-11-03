@@ -7,7 +7,8 @@ k1-agent command line.
     k1-agent mcp --allow-motion                        MCP server for Claude Code / Codex
     k1-agent login [--status]                          sign in to Claude Code (for --provider claude-code)
     k1-agent serve --allow-motion                      take tasks from the web page's prompt box
-    k1-agent eval run|perception|label|report ...      compare models: success rate against cost
+    k1-agent eval run|preview|probes|incidents|perception|label|report|correlate ...
+                                                       evaluate models (see evals/README.md)
 
 The k1_web token comes from K1_WEB_TOKEN (or K1_WEB_ADMIN_PASSWORD); API keys from ANTHROPIC_API_KEY,
 OPENAI_API_KEY or GEMINI_API_KEY. The claude-code and codex providers need no key: they use the account
@@ -298,17 +299,47 @@ def cmd_mcp(config, args):
 def cmd_eval(config, args):
     from k1_agent import evaluate as ev
 
+    stamp = time.strftime("%Y%m%d-%H%M%S")
     if args.eval_command == "run":
-        tasks = [t for t in ev.load_suite(args.suite) if t["tier"] == args.tier and
-                 (not args.tasks or t["id"] in args.tasks.split(","))]
+        tasks = ev.select_tasks(ev.load_suite(args.suite), args.tier, args.tasks, args.split, args.family)
         if not tasks:
-            raise ev.EvalError(f"no tier {args.tier} tasks matched in {args.suite}")
-        name = f"{os.path.splitext(os.path.basename(args.suite))[0]}-tier{args.tier}-{time.strftime('%Y%m%d-%H%M%S')}"
+            raise ev.EvalError(f"no tier {args.tier} tasks matched in {args.suite} (split {args.split})")
+        name = f"{os.path.splitext(os.path.basename(args.suite))[0]}-tier{args.tier}-{args.split}-{stamp}"
         out = args.resume or args.out or os.path.join(config["results_dir"], name)
         ev.run_suite(config, tasks, ev.parse_models(args.models), out, trials=args.trials,
                      modes=args.modes.split(",") if args.modes else None, parallel=args.parallel,
-                     skills_on=not args.no_skills, max_cost_usd=args.max_cost_usd, url=args.url, seed=args.seed)
+                     skills_on=not args.no_skills, max_cost_usd=args.max_cost_usd, url=args.url, seed=args.seed,
+                     operator_model=args.operator_model)
         print(f"results in {out}; summary: k1-agent eval report {out}")
+    elif args.eval_command == "preview":
+        tasks = {t["id"]: t for t in ev.load_suite(args.suite)}
+        if args.task not in tasks:
+            raise ev.EvalError(f"no task {args.task!r}; tasks: {', '.join(tasks)}")
+        out = args.out or f"{args.task}-t{args.trial}.jpg"
+        inst = ev.preview(tasks[args.task], args.trial, args.seed, out)
+        print(yaml.safe_dump({k: v for k, v in inst.items()}, sort_keys=False, allow_unicode=True))
+        if inst["tier"] == 1:
+            print(f"first camera frame: {out}")
+    elif args.eval_command == "probes":
+        from k1_agent.probes import run_probes
+
+        out = args.out or os.path.join(config["results_dir"], f"probes-{stamp}")
+        run_probes(config, args.suite, ev.parse_models(args.models), out, count=args.count, repeats=args.repeats,
+                   parallel=args.parallel, max_cost_usd=args.max_cost_usd, seed=args.seed, only=args.probes)
+        print(f"results in {out}; summary: k1-agent eval report {out}")
+    elif args.eval_command == "incidents":
+        from k1_agent.incidents import run_incidents
+
+        out = args.out or os.path.join(config["results_dir"], f"incidents-{stamp}")
+        run_incidents(config, args.suite, ev.parse_models(args.models), out, trials=args.trials,
+                      parallel=args.parallel, max_cost_usd=args.max_cost_usd, seed=args.seed, only=args.incidents)
+        print(f"results in {out}; summary: k1-agent eval report {out}")
+    elif args.eval_command == "correlate":
+        from k1_agent.report import correlate, correlation_markdown
+
+        result = correlate(ev.load_rows([args.run_a]), ev.load_rows([args.run_b]))
+        print(correlation_markdown(result, os.path.basename(os.path.normpath(args.run_a)),
+                                   os.path.basename(os.path.normpath(args.run_b))))
     elif args.eval_command == "perception":
         name = f"perception-{time.strftime('%Y%m%d-%H%M%S')}"
         out = args.out or os.path.join(config["results_dir"], name)
@@ -320,12 +351,15 @@ def cmd_eval(config, args):
                         choices=args.choices.split(",") if args.choices else None, category=args.category,
                         limit=args.limit, auto=not args.no_auto)
     elif args.eval_command == "report":
+        from k1_agent import incidents, probes
+
         rows = ev.load_rows(args.results)
-        trials, perception = ev.summarize_trials(rows), ev.summarize_perception(rows)
-        print(ev.report_markdown(trials, perception))
+        markdown, trials, perception = ev.report_all(rows)
+        print(markdown)
         if args.html:
+            extra = [s for s in (probes.report(rows), incidents.report(rows)) if s]
             with open(args.html, "w", encoding="utf-8") as f:
-                f.write(ev.report_html(trials, perception))
+                f.write(ev.report_html(trials, perception, extra=extra))
             print(f"\nwrote {args.html}")
     return 0
 
@@ -347,8 +381,45 @@ def add_eval_args(sub):
     q.add_argument("--max-cost-usd", type=float, help="stop starting trials once this much is spent")
     q.add_argument("--no-skills", action="store_true", help="run without the skill library (an ablation)")
     q.add_argument("--out", help="results folder (default <results_dir>/<suite>-tier<N>-<time>, see config.yaml)")
-    q.add_argument("--resume", help="a results folder to continue; finished trials are skipped")
-    q.add_argument("--seed", type=int, default=0, help="seed for the model order")
+    q.add_argument("--resume", help="a results folder to continue; finished trials are skipped (use the same --seed)")
+    q.add_argument("--seed", type=int, default=0, help="picks the task instances and the model order")
+    q.add_argument("--split", choices=["dev", "test", "all"], default="all",
+                   help="dev: tune prompts and skills on these; test: report on these")
+    q.add_argument("--family", help="only tasks of this family")
+    q.add_argument("--operator-model", help="model that plays the operator in tasks with `operator: {llm: ...}` "
+                                            "(default claude-haiku-5-5)")
+
+    q = ev_sub.add_parser("preview", help="show one task instance and save its first camera frame")
+    q.add_argument("task")
+    q.add_argument("suite", nargs="?", default=os.path.join(AGENT_DIR, "evals", "tasks.yaml"))
+    q.add_argument("--trial", type=int, default=1)
+    q.add_argument("--seed", type=int, default=0)
+    q.add_argument("--out", help="where to save the frame (default <task>-t<trial>.jpg)")
+
+    q = ev_sub.add_parser("probes", help="one-call decision tests at key moments (safety, honesty, injection)")
+    q.add_argument("suite", nargs="?", default=os.path.join(AGENT_DIR, "evals", "probes.yaml"))
+    q.add_argument("--models", required=True)
+    q.add_argument("--count", type=int, default=20, help="instances of each probe that has params")
+    q.add_argument("--repeats", type=int, default=1, help="times each instance is asked")
+    q.add_argument("--probes", help="only these probe ids (comma-separated)")
+    q.add_argument("--parallel", type=int, default=4)
+    q.add_argument("--max-cost-usd", type=float)
+    q.add_argument("--seed", type=int, default=0)
+    q.add_argument("--out", help="results folder; reuse one to continue")
+
+    q = ev_sub.add_parser("incidents", help="bench triage episodes on an emulated dev board (no arm)")
+    q.add_argument("suite", nargs="?", default=os.path.join(AGENT_DIR, "evals", "incidents.yaml"))
+    q.add_argument("--models", required=True)
+    q.add_argument("--trials", type=int, default=3)
+    q.add_argument("--incidents", help="only these incident ids (comma-separated)")
+    q.add_argument("--parallel", type=int, default=4)
+    q.add_argument("--max-cost-usd", type=float)
+    q.add_argument("--seed", type=int, default=0)
+    q.add_argument("--out", help="results folder; reuse one to continue")
+
+    q = ev_sub.add_parser("correlate", help="do two runs (e.g. simulator vs real arm) rank the models the same way?")
+    q.add_argument("run_a")
+    q.add_argument("run_b")
 
     q = ev_sub.add_parser("perception", help="tier 0: ask models questions about labelled camera frames")
     q.add_argument("dataset", nargs="?", default=os.path.join(AGENT_DIR, "evals", "perception.jsonl"))
@@ -368,7 +439,8 @@ def add_eval_args(sub):
     q.add_argument("--limit", type=int, default=50)
     q.add_argument("--no-auto", action="store_true", help="skip the automatic gripper open/closed items")
 
-    q = ev_sub.add_parser("report", help="success rate vs cost tables, and an HTML page with the chart")
+    q = ev_sub.add_parser("report", help="tables for every kind of result (trials, perception, probes, incidents), "
+                                         "and an HTML page with the chart")
     q.add_argument("results", nargs="+", help="results folders or results.jsonl files")
     q.add_argument("--html", help="also write an HTML report here")
 
