@@ -26,7 +26,7 @@ The metres scale comes from NXROBO's driver and hasn't been calibrated on the K1
 python3 examples/demo.py /dev/ttyACM0
 ```
 
-Outside the ROS workspace, install the SDK with pip from the repo root: `pip install -e .`
+Outside the ROS workspace, install it with pip: `pip install -e "ros2/unitree_k1_sdk[standalone]"` (from the repo root; the extra pulls in pyserial, numpy and tqdm).
 
 ## Tests
 

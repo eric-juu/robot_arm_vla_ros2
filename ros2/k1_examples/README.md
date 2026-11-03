@@ -5,7 +5,7 @@ Example ROS 2 programs for the K1. They use the same interfaces as any ROS tool:
 - the driver's `enable` service;
 - `joint_states`.
 
-Every move gets `k1_web`'s joint limits and speed limit, and STOP on the web page aborts it.
+Every move gets `k1_web`'s joint limits and speed cap, and STOP on the web page aborts it ([docs/safety.md](../../docs/safety.md)).
 
 Start the bringup first (`ros2 launch k1_web k1_bringup.launch.py ...`, or `mock:=true` without an arm), and enable the motors on the web page.
 

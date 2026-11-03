@@ -1,260 +1,107 @@
 # k1-agent
 
-An AI agent for the K1 arm. It drives the arm through the same `k1_web` API as the web page, so every move gets the server's joint limits, speed limit and stop-on-disconnect. The design follows NVIDIA's [ASPIRE](https://research.nvidia.com/labs/gear/aspire/):
+An AI agent for the K1. It drives the arm through the same k1_web API as the web page, so every move gets k1_web's limits, speed cap, deadman and agent policy ([docs/safety.md](../docs/safety.md)). The design follows NVIDIA's [ASPIRE](https://research.nvidia.com/labs/gear/aspire/):
 
-- **A fixed primitive API** (`k1_agent/primitives.py`): `observe`, `move_joints`, `move_joint_delta`, `go_pose`, `go_home`, `set_gripper`, `stop`, `wait`. Failures come back as typed results (`not_reached`, `clamped`, `safety_interlock`, …) the model can reason about.
-- **Traces:** every call is written to `runs/<time>-<task>/trace.jsonl` with the arm state before and after, plus a camera frame.
-- **Two modes:**
-  - `tools`: the model calls one primitive at a time and sees every frame.
-  - `code`: the model writes a program (code-as-policy). When the program fails, the model diagnoses it from the trace and repairs it.
-- **A skill library** (`skills/*.md`): notes on what works on this arm, read by the agent. New skills the agent drafts wait in `skills/pending/` until you approve them.
-- **An MCP server**, so Claude Code or Codex can be the agent (ASPIRE's own setup).
-- **Pluggable LLMs:** Claude (Anthropic API), OpenAI (GPT-5.x now, GPT-6 Astra later by changing the model name) or Google Gemini (for example Gemini 4 Argon).
-- **Model comparison** (`k1-agent eval`): success rate against cost for several models on the same tasks, in a simulated arm or on the real one. See [Comparing models](#comparing-models).
+- **One set of tools** (`k1_agent/tools.py`): `observe`, `move_joints`, `move_joint_delta`, `go_pose`, `set_gripper`, `stop`, skills, `ask_operator`, `done`… Failures come back typed (`not_reached`, `clamped`, `safety_interlock`, `unavailable`…), so the model can reason about them. The agent's own loop, the MCP server and code mode are all generated from it, with the same operating rules ([AGENTS.md](AGENTS.md)).
+- **Two modes:** `tools` (one call at a time, a fresh camera frame after every move) and `code` (the model writes a program; on failure it diagnoses it from the trace and repairs it).
+- **Two profiles:** `teach` (free joint motion) and `operate` (taught poses, the gripper and approved code skills only).
+- **Traces:** every call, with the arm state before and after and a camera frame, in `~/.k1_agent/runs/<time>-<task>/`.
+- **A skill library** (`skills/`): notes on what works on this arm, and *code skills* (a `.py` program next to the note) that replay a tested routine without improvising. Drafts wait in `skills/pending/` for a person's approval.
+- **Pluggable models:** Claude, OpenAI or Gemini through their APIs, or Claude Code / Codex signed in with a subscription.
+- **Evaluation** (`k1-agent eval`): see [evals/README.md](evals/README.md).
 
-No GPU or ROS is needed on the machine running the agent: the model runs in the provider's cloud.
+No GPU or ROS is needed where the agent runs: the model runs in the provider's cloud.
 
-## Install (on the Linux PC, or any machine that can reach the web page)
+## Install
 
-```bash
-cd ~/Downloads/robot_arm_vla_ros2/agent
-python3 -m venv ~/.k1_agent/venv
-source ~/.k1_agent/venv/bin/activate
-pip install -e ".[all]"          # or .[anthropic], .[openai], .[gemini], .[mcp]
-```
-
-Keep the `-e`: the agent reads `config.yaml` and `skills/` from this folder.
-
-API keys (put them in `~/.k1_agent/keys.sh`, `chmod 600`, and `source` it):
+On the Linux PC, or any machine that can reach the web page (Windows works too):
 
 ```bash
-export ANTHROPIC_API_KEY=...     # for provider: anthropic
-export OPENAI_API_KEY=...        # for provider: openai
-export GEMINI_API_KEY=...        # for provider: gemini
+cd ~/ros2_ws/src/robot_arm_vla_ros2/agent
+python3 -m venv ~/.k1_agent/venv && source ~/.k1_agent/venv/bin/activate
+pip install -e ".[all]"          # or only some of: .[anthropic] .[openai] .[gemini] .[mcp]; .[sim] for evaluations
 ```
 
-## Every session
+Keep the `-e`: the agent reads `config.yaml`, `AGENTS.md` and `skills/` from this folder. Put the API keys you need in `~/.k1_agent/keys.sh` (`chmod 600`) and `source` it: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`.
 
-1. Start the arm and web page as usual (`ros2 launch k1_web k1_bringup.launch.py ...`).
-2. Open the web page, **enable the motors**, and keep the page open: STOP (Space / Esc) there aborts the agent's task.
-3. In another terminal:
+## Running a task
+
+1. Start the bringup, open the web page and **enable the motors**. Keep the page open: STOP there aborts the agent.
+2. In another terminal:
    ```bash
-   source ~/.k1_agent/venv/bin/activate
-   source ~/.k1_web/token.sh        # the agent signs in with K1_WEB_TOKEN
-   source ~/.k1_agent/keys.sh
-   k1-agent observe                 # connection check: prints the state, saves frame.jpg
-   ```
-4. Run a task:
-   ```bash
+   source ~/.k1_agent/venv/bin/activate && source ~/.k1_web/token.sh && source ~/.k1_agent/keys.sh
+   k1-agent observe                                             # connection check: prints the state, saves frame.jpg
    k1-agent run "turn the base left by about 0.3 rad, then come back" --allow-motion
    k1-agent run "pick up the red block" --allow-motion --mode code
-   k1-agent run "..." --provider openai --model gpt-5.5 --allow-motion
+   k1-agent run "press the reset button" --allow-motion --profile operate --provider openai --model <id>
    ```
-   Without `--allow-motion` every motion is refused, which is a safe dry run. The agent posts its reasoning to the page's **Agent log**, and asks you questions in the terminal. In code mode it also asks you to reset the scene between attempts.
-5. After a success it offers to draft a skill. Review it, then:
-   ```bash
-   k1-agent skills pending
-   k1-agent skills show <name>
-   k1-agent skills approve <name>     # or: reject <name>
-   ```
+   Without `--allow-motion` every motion is refused (a safe dry run). The agent narrates in the page's **Agent log** and asks its questions in the terminal (in code mode, also to reset the scene between attempts).
+3. After a success it offers to draft a skill (with the program, in code mode): `k1-agent skills pending`, `skills show <name>`, `skills approve <name>` or `skills reject <name>`.
 
-To run the agent on another machine, use `--url https://<link>.trycloudflare.com` (or set `url:` in `config.yaml`).
+To run the agent on another machine, add `--url https://<link>.trycloudflare.com` (or set `url:` in `config.yaml`). With `K1_WEB_AGENT_TOKEN` set, the agent signs in with it; otherwise with `K1_WEB_TOKEN`.
 
-## Claude Code as the model (sign in, no API key)
+### From the web page
 
-With `--provider claude-code` the agent is a headless Claude Code session, billed to the Claude account Claude Code is signed in with instead of an API key.
+`k1-agent serve --allow-motion` stays connected and runs the tasks people type into the page's **Agent** card, one at a time. With `--models a,b,c` (or `serve_models:` in `config.yaml`) the card gets a model menu; the first is the default. Questions appear in the card (with Yes/No buttons for confirmations), STOP ends the current task, and the safety flags and the model list come only from the command line, never from the page.
 
-1. Install Claude Code on the PC that runs the agent (https://claude.com/claude-code), then sign in once:
-   ```bash
-   k1-agent login            # runs `claude auth login`; opens a browser or prints a link
-   k1-agent login --status   # check
-   ```
-   On a PC without a browser, run `claude setup-token` on any machine and `export CLAUDE_CODE_OAUTH_TOKEN=...` (in `~/.k1_agent/keys.sh`).
-2. Run tasks as usual:
-   ```bash
-   k1-agent run "point the camera at the cup" --provider claude-code --allow-motion
-   ```
-   Or set `provider: claude-code` in `config.yaml`. `claude_code.model` (or `--model sonnet|opus|haiku`) picks the model.
+## Models
 
-How it is locked down:
-- **Tools:** Claude Code gets only the k1 MCP tools. `--tools ""` turns off its shell, file and web tools.
-- **Same limits:** the MCP server runs with this run's `--allow-motion`, `--allow-enable` and `--max-steps`, so the interlocks match `k1-agent run`.
-- **Questions:** they appear on the web page, not in the terminal.
-- **STOP:** STOP on the page ends the session.
-- **API key:** `ANTHROPIC_API_KEY` is removed from Claude Code's environment, so the signed-in account pays. To bill the key instead, set `claude_code.use_api_key: true`.
-- **Traces:** the run's narration and tool calls go to `runs/<time>-<task>/`. The MCP server's own trace, with frames, goes to `runs/<time>-mcp/`.
-
-## Codex as the model (ChatGPT sign-in, no API key)
-
-With `--provider codex` (or `codex:<model>` in `--models`) the agent is a headless OpenAI Codex session, billed to the ChatGPT account Codex is signed in with instead of `OPENAI_API_KEY`.
-
-1. Install Codex (https://github.com/openai/codex). With the standalone Linux binary, also install `codex-code-mode-host` from the same release next to it: without it the k1 tools never reach the model.
-2. Sign in once: `codex login` (`codex login --device-auth` on a PC without a browser).
-3. Run tasks as usual:
-   ```bash
-   k1-agent run "point the camera at the cup" --provider codex --model gpt-6-astra --allow-motion
-   k1-agent serve --models claude-code:claude-opus-5-5,codex:gpt-6-astra --allow-motion
-   ```
-
-How it is locked down:
-- **Tools:** Codex has no switch that leaves only MCP tools, so its own tools (shell, browser, computer use, plugins, sub-agents...) are turned off one by one. The rest is fenced in: a read-only sandbox in an empty folder, and only the k1 server's tools are pre-approved. See `k1_agent/codex.py`, and recheck it after upgrading Codex. Any other tool use is logged in the trace as `codex_item`.
-- **Same limits, questions and STOP** as Claude Code above.
-- **API key:** `OPENAI_API_KEY` is removed from Codex's environment, so the signed-in account pays. To bill the key instead, set `codex.use_api_key: true`.
-- **Cost:** Codex reports tokens, not cost, so the cost shown is estimated from `pricing.yaml`.
-
-## Prompting from the web page
-
-`k1-agent serve` keeps the agent connected and runs the tasks people type into the page's **Agent** card, one at a time:
-
-```bash
-k1-agent serve --provider claude-code --allow-motion      # or --provider anthropic / openai
-k1-agent serve --models claude-code:claude-opus-5-5,claude-code:claude-sonnet-5-5,gpt-5.5,gpt-6-astra --allow-motion
-```
-
-With `--models` (or `serve_models:` in `config.yaml`) the card gets a model menu, so each task can use a different model; the first one is the default. The names are the same as for `k1-agent eval` (`gpt-5.5@high` sets an effort level). Every model is set up when the service starts, so a missing API key or a Claude Code sign-in shows up right away.
-
-- **The card shows:**
-  - the provider and model;
-  - whether the agent is ready or running;
-  - "dry run" when the service has no `--allow-motion`.
-- **Sending a task:** type it and press Enter (Shift+Enter adds a new line). Pick the model (when the service offers several) and `tools` or `code` mode first.
-- **Agent questions:**
-  - questions show up in the card with an answer box;
-  - yes/no checks, such as "save a skill draft?", get Yes and No buttons;
-  - between code-mode attempts, a "scene is reset" button.
-- **STOP** (Esc, or Space when not typing) ends the current task. The service then waits for the next prompt.
-- **What the page can't change:** the safety flags, or which models are on offer. They come only from the `serve` command line.
-
-## Using Claude Code (or Codex) as the agent
-
-```bash
-claude mcp add k1 -- ~/.k1_agent/venv/bin/k1-agent mcp --allow-motion
-```
-
-Start `claude` in this folder, after sourcing `token.sh`, so the MCP server inherits `K1_WEB_TOKEN`. Tell it to follow `AGENTS.md`, then give it a task. Its motion is limited the same way: no `--allow-motion` means no moves, plus the `max_steps` budget and k1_web's limits.
-
-## Settings (`config.yaml`)
-
-| Setting | Meaning |
-|---|---|
-| `provider`, `models` | which LLM: `anthropic`, `openai`, `gemini` or `claude-code`, and the model id for each |
-| `claude_code` | Claude Code's command, model, whether to use an API key, a per-task timeout |
-| `mode` | `tools` or `code` |
-| `max_turns`, `attempts`, `program_timeout` | how long a run may go on |
-| `max_steps` | motion calls per run (`--max-steps`) |
-| `max_step_rad` | cap for `move_joint_delta` |
-| `image_history` | camera frames kept in the conversation (more frames cost more tokens) |
-| `runs_dir`, `skills_dir` | where traces and skills live |
-
-**Switching to GPT-6 Astra:** set `provider: openai` and put the Astra model id under `models.openai` (check the exact id in OpenAI's docs once you have access). Nothing else changes.
-
-## Comparing models
-
-Step-by-step guide: [evals/README.md](evals/README.md).
-
-`k1-agent eval` runs the same tasks with several models and reports **success rate against cost**, the way ASPIRE compares agents. A task's checker decides success, never the model's own claim. A model that says "done" without doing the task fails the trial, and it's counted as a *false success*.
-
-There are three tiers. Tiers 0 and 1 run on any computer, including Windows, with no ROS and no arm. Only tier 2 needs the arm PC.
-
-| Tier | What it tests | Where | Command |
+| Provider | `--provider` / in `--models` | Billed to | Setup |
 |---|---|---|---|
-| 0 | **Perception:** reading wrist-camera frames ("is the gripper open?", "is the block between the fingers?") | anywhere, from saved frames | `eval label`, `eval perception` |
-| 1 | **Decision-making:** tool use, following the rules, honesty (limits, a blocked joint, STOP, asking when unclear) | a simulated arm (the real k1_web server, in-process) | `eval run --tier 1` |
-| 2 | **End to end:** the real arm, with an operator who resets the scene and judges each trial on the web page without being told the model | the real arm (`--url`) | `eval run --tier 2` |
+| Anthropic, OpenAI, Gemini APIs | `anthropic`, `openai`, `gemini`; a bare model id picks the provider from its name | the API key | the key in the environment |
+| Claude Code | `claude-code` / `claude-code:<model>` | the signed-in Claude account | install Claude Code, `k1-agent login` (headless: `claude setup-token`, then `CLAUDE_CODE_OAUTH_TOKEN`) |
+| Codex | `codex` / `codex:<model>` | the signed-in ChatGPT account | install Codex and `codex-code-mode-host` next to it, `codex login` (`--device-auth` without a browser) |
 
-The tasks are in `evals/tasks.yaml`, with the checks explained at the top of the file.
+`<model>@<effort>` sets a reasoning effort (API models). Model ids and the default for each provider are in `config.yaml`; prices in `pricing.yaml`.
 
-### Running a comparison
+Claude Code and Codex run headless, one session per task, and are locked down the same way:
+- their only tools are the k1 MCP tools (Claude Code: `--tools ""`; Codex has no such switch, so its own tools are turned off one by one and the rest is fenced into a read-only sandbox; recheck `k1_agent/codex.py` after upgrading Codex);
+- the MCP server they start runs with this run's `--allow-motion`, `--allow-enable`, `--max-steps` and `--profile`;
+- their system prompt is AGENTS.md, and they finish with the `done` tool (a session that ends without it counts as a failure);
+- questions go to the web page, and STOP on the page ends the session;
+- the provider's API key is removed from their environment so the subscription pays (`use_api_key: true` in `config.yaml` bills the key instead). Codex reports tokens, not cost, so its cost is estimated from `pricing.yaml`.
 
-```bash
-pip install -e ".[all,test]"      # the test extras include the simulator's web server
-# API keys as above; Claude Code models need `k1-agent login`
+## Profiles and code skills
 
-# a pilot: 1 trial per task, to see what a full run costs
-k1-agent eval run --models claude-haiku-5-5,claude-opus-5-5,gpt-5.5,gemini-4-argon,claude-code:sonnet --trials 1
+`--profile operate` (or `profile:` in `config.yaml`) leaves free joint motion out of the agent's tools: it can look, use saved poses and the gripper, and run approved code skills. For an unattended bench, pair it with `agent_free_motion: false` in k1_web, which enforces the same thing on the server.
 
-# the full run: 10 trials, 4 simulated arms side by side, stop starting new trials after $50
-k1-agent eval run --models ... --trials 10 --parallel 4 --max-cost-usd 50
-
-k1-agent eval report evals/results/<run> --html report.html
-```
-
-- **Models:**
-  - A bare id picks the provider from its name (`claude-…`, `gpt-…`, `gemini-…`).
-  - Otherwise write `provider:model`, for example `claude-code:sonnet`.
-  - Add `@effort` for an effort or reasoning level, for example `gpt-5.5@high` or `claude-opus-5-5@low` (OpenAI and Claude API only).
-- **Other options:**
-  - `--modes tools,code`, and `--no-skills` for the ablation, run the ASPIRE variations.
-  - `--tasks S1-single-joint,…` picks tasks.
-  - `--resume <folder>` continues an interrupted run, skipping finished trials.
-- **Order:** trials run in shuffled model order, so slow drift (rate limits, on the real arm lighting or battery) affects every model alike.
-- **Output:** each trial writes one row to `<run>/results.jsonl`. A row holds:
-  - success, claimed success, cost, tokens and time;
-  - the real model id;
-  - the git commit, config, prompts and skills version it ran with.
-
-  Its full trace goes to `<run>/traces/`. Each run uses its own copy of the skill library, so skill drafts written during trials stay in the run folder.
-- **Report:**
-  - a success-vs-cost table with 95% intervals, $ per success and false successes;
-  - a per-task table;
-  - an HTML page with the scatter plot. Models marked `*` are on the frontier: nothing else is both cheaper and at least as successful.
-
-### Perception (tier 0)
+A code skill is `skills/<name>.py` defining `run(k1)` against the code-mode API, next to `skills/<name>.md`. Successful code-mode runs draft one; so can an agent with `save_skill_draft(name, markdown, code)`. Once approved:
 
 ```bash
-# copy run traces from the arm PC first, e.g. scp -r armpc:~/Downloads/robot_arm_vla_ros2/agent/runs ./arm-runs
-k1-agent eval label ./arm-runs                                    # automatic: gripper open/closed
-k1-agent eval label ./arm-runs --question "Is the block between the fingers?" --category grasp
-k1-agent eval perception --models claude-opus-5-5,gemini-4-argon,gpt-5.5 --repeats 3
+k1-agent skills run <name> --repeat 50 --reset-pose home --allow-motion    # replay without a model: "49/50 runs passed"
 ```
 
-- **Labelling:** `label` copies frames into `evals/frames/` and adds items to `evals/perception.jsonl`. With `--question` it opens each frame and asks you for the answer.
-- **Old frames:** frames recorded before the camera-flip fix are upside down. Add `--rotate-180` so the models see them the way the agent sees frames now.
-- **Scoring:** every question also offers "can't tell", which counts as an abstention, not a wrong answer. The report gives accuracy, abstentions, *confidently wrong* answers, and $ per 100 questions.
+The agent runs it with the `run_skill` tool. That turns one paid success into a free, repeatable action, and `--repeat` measures how reliable it is.
 
-### Cost
+## Claude Code or Codex as an interactive agent
 
-- **API models:** tokens come from every API call and are priced from `pricing.yaml`. Check its rates against the providers' pricing pages before a big run. A model missing from the file shows `$?`.
-- **Claude Code:** the cost is Claude Code's own API-equivalent estimate. It's billed to your subscription, not to an API key.
+```bash
+claude mcp add k1 -- ~/.k1_agent/venv/bin/k1-agent mcp --allow-motion        # add --profile operate, --web-operator...
+```
 
-## Safety
+Start `claude` after sourcing `token.sh`, so the MCP server inherits the token. The operating rules come with the server's instructions. Motion is limited the same way: no `--allow-motion` means no moves.
 
-- **k1_web still enforces everything it did for the web page:** joint limits, the speed limit, and holding position on disconnect or stale state.
-- **Interlocks:**
-  - `--allow-motion` is off by default.
-  - `--allow-enable` is off by default, so a human enables the motors.
-  - `max_steps` caps how many moves a run makes.
-  - `move_joint_delta` steps are capped.
-- **STOP:** a STOP from any browser aborts the agent's task immediately. A new run is needed to continue.
-- **Generated programs (code mode):**
-  - They run in a child process with no API keys or token in its environment.
-  - Builtins are restricted, and only `math` can be imported.
-  - Names starting with `_` are rejected, and a time limit applies.
-  - This is a guardrail, not a security sandbox. Run the agent on a machine without other secrets, as ASPIRE also advises.
+## Settings
+
+`config.yaml` is commented: the provider and model ids, the Claude Code / Codex options, the mode and profile, run limits (`max_turns`, `attempts`, `program_timeout`, `max_steps`, `max_step_rad`), `image_history` (frames kept in the conversation), and where traces, eval results and skills live (`runs_dir`, `results_dir`, `skills_dir`). Command-line flags override it.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| `no reply to 'hello'` / `k1_web did not answer 'hello'` | The web server is older than the agent. On the arm PC: `git pull`, `colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2`, `source ~/ros2_ws/install/setup.bash`, and restart `ros2 launch`. The page should then show an **Agent log** panel. |
-| `could not connect … 401` / `HTTP 403` | `K1_WEB_TOKEN` isn't set in this terminal, or it differs from the one the server started with. Run `source ~/.k1_web/token.sh`. |
-| Every move returns `not_ready` | The motors are off. Enable them on the web page. |
+| `no reply to 'hello'` / `k1_web did not answer 'hello'` | The web server runs older code: on the arm PC, `git pull`, `colcon build`, source, restart the launch. |
+| `could not connect … 401` / `HTTP 403` | The token isn't set in this terminal, or differs from the server's: `source ~/.k1_web/token.sh`. |
+| Every move returns `not_ready` | The motors are off: enable them on the page. |
 | Every move returns `safety_interlock` | Add `--allow-motion`. |
-| `Claude Code is not signed in` | Run `k1-agent login` (or set `CLAUDE_CODE_OAUTH_TOKEN`). |
-| The page says "no agent service is running" | Start `k1-agent serve` on the PC, and keep that terminal open. |
+| A move returns `rejected` with "k1_web refuses …" | k1_web's agent policy forbids it ([docs/safety.md](../docs/safety.md#2-k1_webs-agent-policy)). |
+| A tool returns `unavailable` | Not in this session: the profile, `--allow-enable`, or no operator. |
+| `Claude Code is not signed in` | `k1-agent login` (or set `CLAUDE_CODE_OAUTH_TOKEN`). |
+| Codex: "required MCP servers failed to initialize" | Install `codex-code-mode-host` next to `codex`; check that `k1-agent mcp` starts with that `--url`. |
+| The page says "no agent service is running" | Start `k1-agent serve` on the PC and keep that terminal open. |
 
 ## Tests
 
 ```bash
 pip install -e ".[test,mcp]"
-python -m pytest tests          # starts the real k1_web app with a simulated arm; no ROS, no API keys
+python -m pytest tests          # the real k1_web app with a simulated arm: no ROS, no API keys
 ```
-
-## Later (see the plan)
-
-The wrist camera alone gives no depth, and object finding relies on the model's own vision. Next steps for precision:
-- a K1 URDF with forward/inverse kinematics, for `move_to_pose(xyz)`;
-- an open-vocabulary detector, which runs on CPU (slow) or a GPU service;
-- a fixed RGB-D camera.
-
-With a GPU host and RGB-D, the MCP tools here can back a port of ASPIRE's own harness.

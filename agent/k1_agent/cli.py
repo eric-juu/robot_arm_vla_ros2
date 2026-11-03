@@ -430,7 +430,7 @@ def add_eval_args(sub):
     q.add_argument("--out", help="results folder; reuse one to continue")
 
     q = ev_sub.add_parser("label", help="build the perception set from traced camera frames")
-    q.add_argument("runs", nargs="+", help="folders with run traces (for example a copy of the arm PC's runs/)")
+    q.add_argument("runs", nargs="+", help="folders with run traces (for example a copy of the arm PC's ~/.k1_agent/runs)")
     q.add_argument("--out", default=os.path.join(AGENT_DIR, "evals", "perception.jsonl"))
     q.add_argument("--rotate-180", action="store_true", help="turn frames upside down (recorded before the fix)")
     q.add_argument("--question", help="ask this about each frame, e.g. 'Is the block between the fingers?'")

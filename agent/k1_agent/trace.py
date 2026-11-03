@@ -1,8 +1,8 @@
 """
 Run traces, in the spirit of ASPIRE's closed-loop execution engine: every primitive call is written
-to runs/<run>/trace.jsonl with its arguments, result and the arm state before and after, plus a
-camera frame (frame_NNN.jpg) for calls that look or move. The repair loop reads these back to
-find where a program went wrong, and they double as a dataset.
+to <runs_dir>/<run>/trace.jsonl (~/.k1_agent/runs by default) with its arguments, result and the arm
+state before and after, plus a camera frame (frame_NNN.jpg) for calls that look or move. The repair
+loop reads these back to find where a program went wrong, and they double as a dataset.
 """
 import json
 import os

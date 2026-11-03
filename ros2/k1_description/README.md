@@ -45,7 +45,7 @@ Useful frames: `base_link` (mount), `link_grasping_frame` (tool centre point bet
 
 ## Usage
 
-It's built with the rest of the workspace (`colcon build --base-paths ~/Downloads/robot_arm_vla_ros2/ros2`).
+It's built with the rest of the workspace (`colcon build` in `~/ros2_ws`).
 
 ```bash
 # the live arm: robot_state_publisher is part of the bringup; add RViz
@@ -66,7 +66,10 @@ Non-ROS tools (PyBullet, MuJoCo import, Isaac, `yourdfpy`): use `urdf/k1_standal
 
 The original package also had a ros2_control setup. It's left out here on purpose. ros2_control would be a second path to the motors that bypasses `k1_web`'s limits, speed limit and STOP. Instead, `k1_web` serves the same action names a ros2_control setup would (`arm_controller/follow_joint_trajectory`, `gripper_controller/gripper_cmd`), so a MoveIt config can still target them.
 
-## Assumptions and things to verify on the real arm
+## Assumptions to verify
+
+The first-run checks on the real arm are in [docs/setup.md](../../docs/setup.md#first-run-on-the-real-arm); the details:
+
 
 1. **Joint directions.** Command each joint +0.2 rad alone and check that RViz moves the same way. NXROBO's driver needs no sign flips, and the K1 uses the same protocol, but confirm before trusting IK.
 2. **Zero pose.** At all-zeros the arm should stand as in the first image: upper arm vertical, forearm horizontal pointing forward. If not, the K1's homing differs and offsets are needed.
