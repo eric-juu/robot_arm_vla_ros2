@@ -8,7 +8,10 @@ Each task runs one headless Claude Code session:
            --tools "" --allowedTools mcp__k1 --permission-mode dontAsk
 
 - Its only tools are the k1 MCP tools (`--tools ""` turns off Bash, file edits and web access), so
-  it moves the arm with the same primitives, interlocks and step budget as `k1-agent run`.
+  it moves the arm with the same tools, interlocks and step budget as `k1-agent run`, and gets the
+  same operating rules (AGENTS.md) as its system prompt.
+- It finishes by calling the `done(success, summary)` tool, which this runner reads from the event
+  stream. A session that ends without calling done counts as a failure (reason `no_done`).
 - Questions go to the web page (ask_operator through WebOperator).
 - A STOP on the web page ends the session: the MCP server's primitives refuse, and the process is
   terminated.
@@ -22,17 +25,12 @@ import threading
 import time
 
 from k1_agent.client import K1Client
+from k1_agent.prompts import CLI_NOTE, operating_rules
 from k1_agent.providers.base import Usage
 from k1_agent.runner import RunResult
 from k1_agent.trace import Trace
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RESULT_PREFIX = "RESULT:"
-
-FINISH_RULES = f"""
-When you are finished, end your final message with one line: `{RESULT_PREFIX} success` or
-`{RESULT_PREFIX} failed`, then one sentence saying what happened. Only report success if a fresh observe
-frame shows it. You have no shell or file tools; use only the k1 tools."""
 
 
 class ClaudeCodeError(Exception):
@@ -64,27 +62,9 @@ def login(command: str = "claude") -> int:
     return subprocess.call([find_claude(command), "auth", "login"])
 
 
-def operating_rules() -> str:
-    try:
-        with open(os.path.join(AGENT_DIR, "AGENTS.md"), encoding="utf-8") as f:
-            rules = f.read()
-    except OSError:
-        rules = ""
-    return rules + FINISH_RULES
-
-
-def parse_result(text: str) -> tuple[bool, str]:
-    """Success and summary from the final message's `RESULT: success|failed ...` line."""
-    lines = (text or "").strip().splitlines()
-    for i in range(len(lines) - 1, -1, -1):
-        line = lines[i].strip().strip("`*")
-        if line.upper().startswith(RESULT_PREFIX):
-            rest = line[len(RESULT_PREFIX):].strip()
-            word, _, summary = rest.partition(" ")
-            # the sentence may be on the line(s) after the RESULT line
-            summary = summary.strip(" -:.") or " ".join(s.strip() for s in lines[i + 1:] if s.strip())
-            return word.lower().strip(".,:;") == "success", summary or rest
-    return False, (text or "").strip()[-300:] or "Claude Code gave no result"
+def system_rules() -> str:
+    """The shared operating rules, plus the reminder that a CLI agent has only the k1 tools here."""
+    return operating_rules() + "\n" + CLI_NOTE
 
 
 class ClaudeCodeRunner:
@@ -111,6 +91,7 @@ class ClaudeCodeRunner:
         self.cost_usd: float | None = None      # Claude Code's own estimate, at API prices
         self.turns = 0
         self.error: str | None = None           # an error the CLI reported in its event stream
+        self.outcome: tuple[bool, str] | None = None    # from the agent's done(success, summary) call
 
     def mcp_config(self) -> str:
         args = ["-m", "k1_agent.cli", "--url", self.url]
@@ -128,7 +109,7 @@ class ClaudeCodeRunner:
         cmd = launcher + ["-p", prompt, "--output-format", "stream-json", "--verbose",
                "--mcp-config", self.mcp_config(), "--strict-mcp-config", "--tools", "",
                "--allowedTools", "mcp__k1", "--permission-mode", "dontAsk",
-               "--append-system-prompt", operating_rules(), "--no-session-persistence"]
+               "--append-system-prompt", system_rules(), "--no-session-persistence"]
         if self.model:
             cmd += ["--model", self.model]
         if self.max_budget_usd:
@@ -137,6 +118,7 @@ class ClaudeCodeRunner:
 
     def environment(self) -> dict:
         env = dict(os.environ, K1_WEB_TOKEN=self.client.token)     # for the MCP server Claude Code starts
+        env.pop("K1_WEB_AGENT_TOKEN", None)     # so it signs in with exactly this runner's token
         if not self.use_api_key:
             # with an API key in the environment Claude Code bills the API instead of the signed-in account
             env.pop("ANTHROPIC_API_KEY", None)
@@ -147,6 +129,20 @@ class ClaudeCodeRunner:
             self.client.note(text[:300])
         except Exception:
             pass
+
+    def tool_call(self, name: str, arguments):
+        """Trace and narrate one of the agent's tool calls; `done` ends the task with its verdict."""
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except ValueError:
+                arguments = {"raw": arguments}
+        arguments = arguments if isinstance(arguments, dict) else {}
+        self.trace.log("tool_call", name=name, arguments=arguments)
+        if name == "done":
+            self.outcome = (bool(arguments.get("success")), str(arguments.get("summary", "")))
+        elif name != "note":
+            self.note(f"-> {name}({json.dumps(arguments)[:200]})")
 
     def handle_event(self, event: dict) -> str | None:
         """Trace and narrate one stream-json event. Returns the final text for the result event."""
@@ -159,10 +155,7 @@ class ClaudeCodeRunner:
                     self.trace.log("llm", text=block["text"])
                     self.note(block["text"].strip())
                 elif block.get("type") == "tool_use":
-                    name = block.get("name", "").removeprefix("mcp__k1__")
-                    self.trace.log("tool_call", name=name, arguments=block.get("input"))
-                    if name != "note":
-                        self.note(f"-> {name}({json.dumps(block.get('input'))[:200]})")
+                    self.tool_call(block.get("name", "").removeprefix("mcp__k1__"), block.get("input"))
         elif kind == "result":
             usage = event.get("usage") or {}
             self.usage = Usage(input=usage.get("input_tokens") or 0, output=usage.get("output_tokens") or 0,
@@ -176,6 +169,7 @@ class ClaudeCodeRunner:
         return None
 
     def run(self, task: str, mode: str = "tools") -> RunResult:
+        self.outcome = None
         self.trace.log("task", task=task, mode=mode, provider=self.name, model=self.model)
         proc = subprocess.Popen(self.command_line(task, mode), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
@@ -210,12 +204,15 @@ class ClaudeCodeRunner:
             result = RunResult(False, "the operator pressed STOP", "stopped", self.trace.dir)
         elif ended == ["timeout"]:
             result = RunResult(False, f"no result after {self.timeout:.0f} s", "timeout", self.trace.dir)
+        elif self.outcome is not None:
+            success, summary = self.outcome
+            result = RunResult(success, summary, "done", self.trace.dir)
         elif final is None:
             detail = self.error or "".join(stderr_lines).strip()[-500:] or f"exit code {proc.returncode}"
             result = RunResult(False, f"{self.label} failed: {detail}", "error", self.trace.dir)
         else:
-            success, summary = parse_result(final)
-            result = RunResult(success, summary, "done", self.trace.dir)
+            result = RunResult(False, f"ended without calling done: {final.strip()[-300:]}", "no_done",
+                               self.trace.dir)
         result.usage, result.cost_usd, result.llm_calls = self.usage, self.cost_usd, self.turns
         self.trace.log("outcome", success=result.success, summary=result.summary, reason=result.reason,
                        usage=self.usage.as_dict() if self.usage else None, cost_usd=self.cost_usd,

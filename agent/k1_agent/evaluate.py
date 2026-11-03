@@ -26,11 +26,11 @@ from datetime import datetime
 
 import yaml
 
+from k1_agent.primitives import ARM_JOINTS
+from k1_agent.tools import MOTION_TOOLS as MOTION_NAMES
 from k1_agent.trace import Trace
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_roll", "wrist_flex", "gripper_roll"]
-MOTION_NAMES = {"move_joints", "move_joint_delta", "go_pose", "go_home", "set_gripper"}
 DEFAULT_ANSWER = "Yes, go ahead."
 DEFAULT_TOL = 0.03
 CLI_AGENTS = {"claude-code": "claude", "codex": "codex"}     # providers run as a coding agent's CLI
@@ -129,7 +129,7 @@ def skills_hash(skills_dir: str | None) -> str:
 
 def versions(config: dict, skills_dir: str | None) -> dict:
     """What a result depends on besides the model, so runs of different versions aren't compared blindly."""
-    from k1_agent import claude_code, runner
+    from k1_agent.prompts import prompt_digest
 
     try:
         commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=AGENT_DIR, capture_output=True,
@@ -139,9 +139,8 @@ def versions(config: dict, skills_dir: str | None) -> dict:
         commit = commit + ("+dirty" if dirty else "") if commit else "unknown"
     except (OSError, subprocess.SubprocessError):
         commit = "unknown"
-    prompts = (runner.SYSTEM_PROMPT + runner.CODE_INSTRUCTIONS + claude_code.FINISH_RULES).encode()
     return {"commit": commit, "config": _sha(_read(config["config_path"])), "skills": skills_hash(skills_dir),
-            "prompts": _sha(prompts, _read(os.path.join(AGENT_DIR, "AGENTS.md")))}
+            "prompts": prompt_digest()}
 
 
 # ---------------- checking a trial ----------------
@@ -494,7 +493,8 @@ class Evaluator:
                 cc, runner_class, extra = cfg.get("claude_code") or {}, ClaudeCodeRunner, {}
             else:   # Codex reports tokens, not cost
                 cc, runner_class, extra = cfg.get("codex") or {}, CodexRunner, {"pricing": self.pricing}
-            flags = (["--allow-motion"] if allow_motion else []) + ["--max-steps", str(cfg["max_steps"])]
+            flags = (["--allow-motion"] if allow_motion else []) + ["--max-steps", str(cfg["max_steps"]),
+                                                                    "--profile", job.task.get("profile", "teach")]
             runner = runner_class(env.client, trace, env.client.http_url, cfg["config_path"], flags,
                                   model=job.model.model if job.model.model != "default" else None,
                                   command=cc.get("command") or CLI_AGENTS[job.model.provider],
@@ -504,6 +504,7 @@ class Evaluator:
         from k1_agent.primitives import Primitives
         from k1_agent.runner import AgentRunner
         from k1_agent.skills import SkillLibrary
+        from k1_agent.tools import ArmToolbox
 
         with self._lock:
             provider = env.providers.get(job.model) or make_api_provider(job.model)
@@ -512,10 +513,10 @@ class Evaluator:
                            max_steps=cfg["max_steps"], max_step_rad=cfg["max_step_rad"], tolerance=cfg["tolerance"],
                            move_timeout=cfg["move_timeout"])
         operator = AutoOperator(answer, reset) if env.sim is not None else env.web_operator
-        runner = AgentRunner(provider, prims, SkillLibrary(self.skills_dir), trace, operator,
-                             max_turns=cfg["max_turns"], image_history=cfg["image_history"],
-                             max_tokens=cfg["max_tokens"], program_timeout=cfg["program_timeout"],
-                             pricing=self.pricing)
+        toolbox = ArmToolbox(prims, SkillLibrary(self.skills_dir), operator, profile=job.task.get("profile", "teach"),
+                             program_timeout=cfg["program_timeout"])
+        runner = AgentRunner(provider, toolbox, trace, operator, max_turns=cfg["max_turns"],
+                             image_history=cfg["image_history"], max_tokens=cfg["max_tokens"], pricing=self.pricing)
         if job.mode == "code":
             return runner.run_code(job.task["prompt"], attempts=cfg["attempts"])
         return runner.run_tools(job.task["prompt"])

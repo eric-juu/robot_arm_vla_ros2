@@ -287,7 +287,3 @@ class Primitives:
         except K1Error as e:
             return fail("connection", str(e))
         return {"ok": True}
-
-
-PROGRAM_API = ["observe", "move_joints", "move_joint_delta", "go_pose", "go_home", "set_gripper",
-               "stop", "wait", "list_poses", "note"]

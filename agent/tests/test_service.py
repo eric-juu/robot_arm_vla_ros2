@@ -7,7 +7,7 @@ import time
 import pytest
 from websockets.sync.client import connect
 
-from k1_agent.claude_code import ClaudeCodeRunner, parse_result
+from k1_agent.claude_code import ClaudeCodeRunner
 from k1_agent.client import K1Client
 from k1_agent.codex import CodexRunner
 from k1_agent.pricing import Pricing
@@ -16,6 +16,7 @@ from k1_agent.providers.base import Provider, Reply, ToolCall
 from k1_agent.runner import AgentRunner
 from k1_agent.service import AgentService
 from k1_agent.skills import SkillLibrary
+from k1_agent.tools import ArmToolbox
 from k1_agent.trace import Trace
 
 
@@ -67,7 +68,8 @@ def test_prompt_from_the_page_runs_a_task_and_asks_questions(live_server, tmp_pa
         def run_task(text, mode, operator):
             trace = Trace(live_server["runs"], text)
             prims = Primitives(k1, trace, allow_motion=True)
-            runner = AgentRunner(provider, prims, SkillLibrary(str(tmp_path / "skills")), trace, operator)
+            toolbox = ArmToolbox(prims, SkillLibrary(str(tmp_path / "skills")), operator)
+            runner = AgentRunner(provider, toolbox, trace, operator)
             result = runner.run_tools(text)
             results.append((text, mode, result, operator.confirm("Save a skill draft?")))
             return result
@@ -159,9 +161,12 @@ FAKE_CLAUDE = textwrap.dedent("""
         {"type": "assistant", "message": {"content": [
             {"type": "text", "text": "Looking first."},
             {"type": "tool_use", "id": "t1", "name": "mcp__k1__observe", "input": {}}]}},
-        {"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "total_cost_usd": 0,
-         "result": "The base is turned.\\nRESULT: success - turned the base left"},
     ]
+    if "forget" not in sys.argv[2]:
+        events.append({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2",
+                       "name": "mcp__k1__done", "input": {"success": True, "summary": "turned the base left"}}]}})
+    events.append({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "total_cost_usd": 0,
+                   "result": "The base is turned."})
     for event in events:
         print(json.dumps(event), flush=True)
 """)
@@ -191,7 +196,8 @@ def test_claude_code_runner(live_server, tmp_path, monkeypatch):
         assert argv[argv.index("--model") + 1] == "sonnet"
         server = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["k1"]
         assert server["args"][-4:] == ["--web-operator", "--allow-motion", "--max-steps", "5"]
-        assert "RESULT:" in argv[argv.index("--append-system-prompt") + 1]
+        rules = argv[argv.index("--append-system-prompt") + 1]
+        assert "done(success, summary)" in rules and "only the k1 tools" in rules
 
         notes = [page.receive(lambda m: m["type"] == "agent_note")["text"] for _ in range(3)]
         assert notes[:2] == ["Looking first.", "-> observe({})"] and notes[2].startswith("SUCCESS")
@@ -211,11 +217,11 @@ def test_claude_code_runner_ends_on_stop(live_server, tmp_path, monkeypatch):
     page.ws.close()
 
 
-def test_parse_result():
-    assert parse_result("ok\nRESULT: success - picked it up") == (True, "picked it up")
-    assert parse_result("**RESULT: failed** the cup fell")[0] is False
-    assert parse_result("I could not see the cup.") == (False, "I could not see the cup.")
-    assert parse_result("RESULT: failed\nThe camera showed nothing.") == (False, "The camera showed nothing.")
+def test_claude_code_session_without_done_fails(live_server, tmp_path, monkeypatch):
+    with K1Client(live_server["url"], live_server["token"]) as k1:
+        runner = make_claude_runner(live_server, tmp_path, k1, monkeypatch)
+        result = runner.run("forget to call done")
+        assert (result.success, result.reason) == (False, "no_done") and "The base is turned." in result.summary
 
 
 FAKE_CODEX = textwrap.dedent("""
@@ -233,8 +239,9 @@ FAKE_CODEX = textwrap.dedent("""
         {"type": "item.started", "item": dict(item, status="in_progress")},
         {"type": "item.completed", "item": dict(item, status="completed")},
         {"type": "item.completed", "item": {"id": "i2", "type": "file_change", "status": "failed"}},
-        {"type": "item.completed", "item": {"id": "i3", "type": "agent_message",
-                                            "text": "The base is turned.\\nRESULT: success - turned the base left"}},
+        {"type": "item.started", "item": {"id": "i3", "type": "mcp_tool_call", "server": "k1", "tool": "done",
+                                          "arguments": {"success": True, "summary": "turned the base left"}}},
+        {"type": "item.completed", "item": {"id": "i4", "type": "agent_message", "text": "The base is turned."}},
         {"type": "turn.completed", "usage": {"input_tokens": 3000, "cached_input_tokens": 1000, "output_tokens": 100,
                                              "reasoning_output_tokens": 20}},
     ]
@@ -274,10 +281,10 @@ def test_codex_runner(live_server, tmp_path, monkeypatch):
         assert overrides["mcp_servers.k1.default_tools_approval_mode"] == '"approve"'
         assert json.loads(overrides["mcp_servers.k1.args"])[-4:] == ["--web-operator", "--allow-motion",
                                                                     "--max-steps", "5"]
-        assert "RESULT:" in argv[-1] and argv[-1].endswith("Task for the K1 arm: turn the base left")
+        assert "done(success, summary)" in argv[-1] and argv[-1].endswith("Task for the K1 arm: turn the base left")
 
         notes = [page.receive(lambda m: m["type"] == "agent_note")["text"] for _ in range(4)]
-        assert notes[:3] == ["Looking first.", "-> observe({})", "The base is turned.\nRESULT: success - turned the base left"]
+        assert notes[:3] == ["Looking first.", "-> observe({})", "The base is turned."]
         assert notes[3].startswith("SUCCESS")
         entries = [json.loads(line) for line in open(runner.trace.path)]
         assert {"task", "codex_init", "llm", "tool_call", "codex_item", "codex_result", "outcome"} <= {

@@ -19,9 +19,10 @@ import sys
 import threading
 import time
 
+from k1_agent.primitives import ARM_JOINTS
+
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 K1_WEB_DIR = os.path.join(os.path.dirname(AGENT_DIR), "ros2", "k1_web")
-ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_roll", "wrist_flex", "gripper_roll"]
 SIM_POSES = {"home": {"joints": [0.0] * 6, "gripper": 1.0},
              "ready": {"joints": [0.0, -0.3, 0.5, 0.0, -0.2, 0.0], "gripper": 1.0}}
 SIM_FRAME = base64.b64decode(

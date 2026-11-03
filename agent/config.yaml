@@ -42,5 +42,8 @@ max_step_rad: 0.2               # cap for move_joint_delta
 tolerance: 0.05                 # rad; a move counts as reached within this
 move_timeout: 10                # seconds a move may take
 
-runs_dir: runs                  # traces: runs/<time>-<task>/trace.jsonl + frames (relative to this file)
-skills_dir: skills              # the skill library (relative to this file)
+profile: teach                  # teach (free joint motion) | operate (taught poses, gripper, code skills only)
+
+runs_dir: ~/.k1_agent/runs      # traces: <runs_dir>/<time>-<task>/trace.jsonl + frames
+results_dir: ~/.k1_agent/eval-results   # `k1-agent eval` results, one folder per run
+skills_dir: skills              # the skill library, versioned in the repo (relative to this file)

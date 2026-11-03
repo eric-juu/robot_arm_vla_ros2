@@ -8,6 +8,7 @@ from k1_agent.primitives import Primitives
 from k1_agent.providers.base import Provider, Reply, ToolCall
 from k1_agent.runner import AgentRunner, extract_code, prune_images
 from k1_agent.skills import SkillLibrary
+from k1_agent.tools import ArmToolbox
 from k1_agent.trace import Trace
 
 
@@ -57,7 +58,8 @@ def setup(live_server, tmp_path):
 
 def make_runner(prims, skills, replies):
     provider = FakeProvider(replies)
-    runner = AgentRunner(provider, prims, skills, prims.trace, ScriptedOperator(), max_turns=6)
+    operator = ScriptedOperator()
+    runner = AgentRunner(provider, ArmToolbox(prims, skills, operator), prims.trace, operator, max_turns=6)
     return runner, provider
 
 
@@ -118,9 +120,11 @@ def test_code_mode_with_repair(setup):
 
     path = runner.draft_skill("turn the base")
     assert path.endswith(os.path.join("pending", "turn-base.md"))
-    assert skills.pending()[0] == {"name": "turn-base", "description": "turning the base"}
+    # code mode: the program that worked is saved with the note, as a code skill
+    assert skills.pending()[0] == {"name": "turn-base", "description": "turning the base", "code": True}
+    assert "move_joint_delta('shoulder_pan', 0.1)" in skills.read_code("turn-base", pending=True)
     skills.approve("turn-base")
-    assert "turn-base" in skills.index_text()
+    assert "turn-base (code)" in skills.index_text() and skills.read_code("turn-base")
 
 
 def test_helpers():

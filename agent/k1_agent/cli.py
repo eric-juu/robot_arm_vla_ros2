@@ -3,7 +3,7 @@ k1-agent command line.
 
     k1-agent observe [--out frame.jpg]                 check the connection, print the state, save a frame
     k1-agent run "TASK" --allow-motion [--mode code]   run the agent on a task
-    k1-agent skills [list|pending|show NAME|approve NAME|reject NAME]
+    k1-agent skills [list|pending|show NAME|approve NAME|reject NAME|run NAME]
     k1-agent mcp --allow-motion                        MCP server for Claude Code / Codex
     k1-agent login [--status]                          sign in to Claude Code (for --provider claude-code)
     k1-agent serve --allow-motion                      take tasks from the web page's prompt box
@@ -27,20 +27,23 @@ from k1_agent.client import K1Client, K1Error
 from k1_agent.evaluate import EvalError
 from k1_agent.primitives import Primitives
 from k1_agent.skills import SkillLibrary
+from k1_agent.tools import PROFILES, ArmToolbox
 from k1_agent.trace import Trace
 
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_CONFIG = os.path.join(AGENT_DIR, "config.yaml")
+DEFAULTS = {"runs_dir": "~/.k1_agent/runs", "results_dir": "~/.k1_agent/eval-results", "skills_dir": "skills",
+            "profile": "teach"}
 
 
 def load_config(path: str | None) -> dict:
     path = path or DEFAULT_CONFIG
     with open(path, encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
+        config = {**DEFAULTS, **(yaml.safe_load(f) or {})}
     config["config_path"] = os.path.abspath(path)
     base = os.path.dirname(config["config_path"])
-    for key in ("runs_dir", "skills_dir"):     # relative to the config file
-        config[key] = os.path.join(base, os.path.expanduser(config.get(key, key.split("_")[0])))
+    for key in ("runs_dir", "skills_dir", "results_dir"):     # relative to the config file
+        config[key] = os.path.normpath(os.path.join(base, os.path.expanduser(config[key])))
     return config
 
 
@@ -48,6 +51,8 @@ def add_safety_args(p: argparse.ArgumentParser):
     p.add_argument("--allow-motion", action="store_true", help="let the agent move the arm (off by default)")
     p.add_argument("--allow-enable", action="store_true", help="let the agent enable/disable the motors")
     p.add_argument("--max-steps", type=int, help="motion calls allowed in this run")
+    p.add_argument("--profile", choices=PROFILES,
+                   help="teach: free joint motion; operate: taught poses, gripper and code skills only")
 
 
 def add_provider_args(p: argparse.ArgumentParser):
@@ -59,6 +64,11 @@ def make_prims(config, args, client, trace=None) -> Primitives:
     return Primitives(client, trace, allow_motion=args.allow_motion, allow_enable=args.allow_enable,
                       max_steps=args.max_steps or config["max_steps"], max_step_rad=config["max_step_rad"],
                       tolerance=config["tolerance"], move_timeout=config["move_timeout"])
+
+
+def make_toolbox(config, args, client, trace=None, operator=None) -> ArmToolbox:
+    return ArmToolbox(make_prims(config, args, client, trace), SkillLibrary(config["skills_dir"]), operator,
+                      profile=args.profile or config["profile"], program_timeout=config["program_timeout"])
 
 
 def cmd_observe(config, args):
@@ -77,6 +87,7 @@ def cmd_observe(config, args):
 def mcp_safety_args(args) -> list[str]:
     """The run's safety flags, passed on to the `k1-agent mcp` server that Claude Code or Codex starts."""
     flags = (["--allow-motion"] if args.allow_motion else []) + (["--allow-enable"] if args.allow_enable else [])
+    flags += ["--profile", args.profile] if args.profile else []
     return flags + (["--max-steps", str(args.max_steps)] if args.max_steps else [])
 
 
@@ -85,7 +96,7 @@ def build_task_runner(config, args, client, log=print, spec=None):
     evaluate.ModelSpec) if given, else --provider / --model / config."""
     provider_name = spec.provider if spec else args.provider or config["provider"]
     effort = spec.effort if spec else None
-    skills = SkillLibrary(config["skills_dir"])
+    profile = args.profile or config["profile"]
 
     if provider_name in ("claude-code", "codex"):      # a coding agent's CLI, signed in to its own account
         if effort:
@@ -118,7 +129,8 @@ def build_task_runner(config, args, client, log=print, spec=None):
                             timeout=cc.get("timeout", 900), **extra)
             return runner.run(text, mode)
 
-        return run_task, {"provider": provider_name, "model": model or "default", "allow_motion": args.allow_motion}
+        return run_task, {"provider": provider_name, "model": model or "default", "allow_motion": args.allow_motion,
+                          "profile": profile}
 
     from k1_agent.pricing import Pricing
     from k1_agent.providers.base import make_provider
@@ -137,11 +149,10 @@ def build_task_runner(config, args, client, log=print, spec=None):
 
     def run_task(text, mode, operator):
         trace = Trace(config["runs_dir"], text)
-        prims = make_prims(config, args, client, trace)
-        runner = AgentRunner(provider, prims, skills, trace, operator, max_turns=config["max_turns"],
-                             image_history=config["image_history"], max_tokens=config["max_tokens"],
-                             program_timeout=config["program_timeout"], pricing=pricing)
-        log(f"running {mode} mode with {provider_name}:{model}; trace in {trace.dir}")
+        toolbox = make_toolbox(config, args, client, trace, operator)
+        runner = AgentRunner(provider, toolbox, trace, operator, max_turns=config["max_turns"],
+                             image_history=config["image_history"], max_tokens=config["max_tokens"], pricing=pricing)
+        log(f"running {mode} mode ({profile} profile) with {provider_name}:{model}; trace in {trace.dir}")
         if mode == "code":
             result = runner.run_code(text, attempts=args.attempts or config["attempts"])
         else:
@@ -153,7 +164,7 @@ def build_task_runner(config, args, client, log=print, spec=None):
         return result
 
     return run_task, {"provider": provider_name, "model": model + (f"@{effort}" if effort else ""),
-                      "allow_motion": args.allow_motion}
+                      "allow_motion": args.allow_motion, "profile": profile}
 
 
 def cmd_run(config, args):
@@ -223,12 +234,46 @@ def cmd_skills(config, args):
         pending = skills.pending()
         print("\n".join(f"- {s['name']}: {s['description']}" for s in pending) or "(nothing pending)")
     elif args.action == "show":
-        print(skills.read(args.name) or skills.read(args.name, pending=True) or f"no skill {args.name!r}")
+        for pending in (False, True):
+            text = skills.read(args.name, pending)
+            if text:
+                code = skills.read_code(args.name, pending)
+                print(text + (f"\n--- {args.name}.py ---\n{code}" if code else ""))
+                break
+        else:
+            print(f"no skill {args.name!r}")
     elif args.action == "approve":
         print(f"approved: {skills.approve(args.name)}")
     elif args.action == "reject":
         skills.reject(args.name)
         print(f"deleted pending skill {args.name}")
+    elif args.action == "run":
+        return run_code_skill(config, args, skills)
+
+
+def run_code_skill(config, args, skills) -> int:
+    """Replay an approved code skill through the sandbox, with no model: `--repeat N` measures how reliable it is."""
+    code = skills.read_code(args.name)
+    if code is None:
+        print(f"no code skill {args.name!r} (approved skills with a .py program: "
+              f"{[s['name'] for s in skills.list() if s.get('code')]})", file=sys.stderr)
+        return 1
+    if not args.allow_motion:
+        print("note: --allow-motion not given, so every motion will be refused (dry run)")
+    passed = 0
+    with K1Client(args.url or config["url"]) as client:
+        for i in range(1, args.repeat + 1):
+            trace = Trace(config["runs_dir"], f"skill-{args.name}")
+            result = make_toolbox(config, args, client, trace).run_program(code)
+            ok = result.ok and result.returned is not False and not (
+                isinstance(result.returned, dict) and result.returned.get("ok") is False)
+            passed += ok
+            trace.log("outcome", success=ok, summary=result.error or str(result.returned)[:300], reason="skill_run")
+            print(f"[{i}/{args.repeat}] {'PASS' if ok else 'FAIL'}  {result.error or result.returned!r}  ({trace.dir})")
+            if i < args.repeat and args.reset_pose:
+                make_prims(config, args, client).go_pose(args.reset_pose)
+    print(f"{args.name}: {passed}/{args.repeat} runs passed")
+    return 0 if passed == args.repeat else 1
 
 
 def cmd_mcp(config, args):
@@ -240,7 +285,7 @@ def cmd_mcp(config, args):
     if args.web_operator:
         from k1_agent.web_operator import WebOperator
         operator = WebOperator(client)
-    server = build_server(make_prims(config, args, client, trace), SkillLibrary(config["skills_dir"]), operator)
+    server = build_server(make_toolbox(config, args, client, trace, operator))
     try:
         if args.transport == "stdio":
             server.run("stdio")
@@ -259,14 +304,14 @@ def cmd_eval(config, args):
         if not tasks:
             raise ev.EvalError(f"no tier {args.tier} tasks matched in {args.suite}")
         name = f"{os.path.splitext(os.path.basename(args.suite))[0]}-tier{args.tier}-{time.strftime('%Y%m%d-%H%M%S')}"
-        out = args.resume or args.out or os.path.join(AGENT_DIR, "evals", "results", name)
+        out = args.resume or args.out or os.path.join(config["results_dir"], name)
         ev.run_suite(config, tasks, ev.parse_models(args.models), out, trials=args.trials,
                      modes=args.modes.split(",") if args.modes else None, parallel=args.parallel,
                      skills_on=not args.no_skills, max_cost_usd=args.max_cost_usd, url=args.url, seed=args.seed)
         print(f"results in {out}; summary: k1-agent eval report {out}")
     elif args.eval_command == "perception":
         name = f"perception-{time.strftime('%Y%m%d-%H%M%S')}"
-        out = args.out or os.path.join(AGENT_DIR, "evals", "results", name)
+        out = args.out or os.path.join(config["results_dir"], name)
         ev.run_perception(config, args.dataset, ev.parse_models(args.models), out, repeats=args.repeats,
                           parallel=args.parallel, max_cost_usd=args.max_cost_usd)
         print(f"results in {out}; summary: k1-agent eval report {out}")
@@ -301,7 +346,7 @@ def add_eval_args(sub):
     q.add_argument("--parallel", type=int, default=1, help="simulated arms run side by side (tier 1)")
     q.add_argument("--max-cost-usd", type=float, help="stop starting trials once this much is spent")
     q.add_argument("--no-skills", action="store_true", help="run without the skill library (an ablation)")
-    q.add_argument("--out", help="results folder (default evals/results/<suite>-tier<N>-<time>)")
+    q.add_argument("--out", help="results folder (default <results_dir>/<suite>-tier<N>-<time>, see config.yaml)")
     q.add_argument("--resume", help="a results folder to continue; finished trials are skipped")
     q.add_argument("--seed", type=int, default=0, help="seed for the model order")
 
@@ -354,9 +399,13 @@ def main(argv=None):
     p = sub.add_parser("login", help="sign in to Claude Code, for --provider claude-code")
     p.add_argument("--status", action="store_true", help="only show whether it is signed in")
 
-    p = sub.add_parser("skills", help="manage the skill library")
-    p.add_argument("action", nargs="?", default="list", choices=["list", "pending", "show", "approve", "reject"])
+    p = sub.add_parser("skills", help="manage the skill library; `run` replays a code skill without a model")
+    p.add_argument("action", nargs="?", default="list",
+                   choices=["list", "pending", "show", "approve", "reject", "run"])
     p.add_argument("name", nargs="?")
+    p.add_argument("--repeat", type=int, default=1, help="run: how many times to replay it")
+    p.add_argument("--reset-pose", help="run: saved pose to go to between repeats")
+    add_safety_args(p)
 
     p = sub.add_parser("mcp", help="serve the primitives over MCP")
     p.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
@@ -366,7 +415,7 @@ def main(argv=None):
     add_eval_args(sub)
 
     args = parser.parse_args(argv)
-    if args.command == "skills" and args.action in ("show", "approve", "reject") and not args.name:
+    if args.command == "skills" and args.action in ("show", "approve", "reject", "run") and not args.name:
         parser.error(f"skills {args.action} needs a NAME")
     config = load_config(args.config)
     try:

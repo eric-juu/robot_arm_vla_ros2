@@ -26,7 +26,7 @@ import subprocess
 import sys
 import tempfile
 
-from k1_agent.claude_code import ClaudeCodeRunner, operating_rules
+from k1_agent.claude_code import ClaudeCodeRunner, system_rules
 from k1_agent.providers.base import Usage
 
 # Codex features that give the model tools besides the k1 ones (`codex features list`)
@@ -93,7 +93,7 @@ class CodexRunner(ClaudeCodeRunner):
         return overrides
 
     def command_line(self, task: str, mode: str = "tools") -> list[str]:
-        prompt = f"{operating_rules()}\n\nTask for the K1 arm: {task}"
+        prompt = f"{system_rules()}\n\nTask for the K1 arm: {task}"
         if mode == "code":
             prompt += ("\n\nWork in short, planned sequences: say your plan in a note first, then carry it out, "
                        "checking the frame each motion tool returns.")
@@ -109,6 +109,7 @@ class CodexRunner(ClaudeCodeRunner):
 
     def environment(self) -> dict:
         env = dict(os.environ, K1_WEB_TOKEN=self.client.token)
+        env.pop("K1_WEB_AGENT_TOKEN", None)
         if not self.use_api_key:
             # bill the signed-in ChatGPT account, not an API key that happens to be set
             env.pop("OPENAI_API_KEY", None)
@@ -124,9 +125,7 @@ class CodexRunner(ClaudeCodeRunner):
         elif kind == "item.started" and item.get("type") == "mcp_tool_call":
             self.tool_calls += 1
             name = item.get("tool", "") if item.get("server") == "k1" else f"{item.get('server')}.{item.get('tool')}"
-            self.trace.log("tool_call", name=name, arguments=item.get("arguments"))
-            if name != "note":
-                self.note(f"-> {name}({json.dumps(item.get('arguments'))[:200]})")
+            self.tool_call(name, item.get("arguments"))
         elif kind == "item.completed" and item.get("type") == "agent_message":
             text = item.get("text", "")
             if text.strip():
