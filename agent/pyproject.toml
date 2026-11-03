@@ -15,7 +15,8 @@ openai = ["openai>=1.66"]
 gemini = ["google-genai>=1.50"]
 mcp = ["mcp"]
 all = ["anthropic", "openai>=1.66", "google-genai>=1.50", "mcp"]
-test = ["pytest", "fastapi", "uvicorn", "httpx"]
+sim = ["fastapi", "uvicorn", "pillow"]           # the simulated arm for `k1-agent eval`
+test = ["pytest", "fastapi", "uvicorn", "httpx", "pillow"]
 
 [project.scripts]
 k1-agent = "k1_agent.cli:main"
