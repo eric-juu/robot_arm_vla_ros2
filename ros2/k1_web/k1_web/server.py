@@ -13,7 +13,11 @@ a PoseStore and an async `enable_fn(bool) -> (success, message)`.
 
 Everything except the login page and the UI assets needs the session cookie or an
 `Authorization: Bearer <token>` header (for scripts and agents). The optional admin password
-(K1_WEB_ADMIN_PASSWORD) works anywhere the token does.
+(K1_WEB_ADMIN_PASSWORD) works anywhere the token does. The optional agent token (K1_WEB_AGENT_TOKEN) is
+accepted only as a Bearer token, and its connections are always agents: they can't sign in to the page,
+answer the agent's questions or act as a person.
+
+Every message from an agent connection goes through the AgentPolicy (policy.py), whichever token it used.
 """
 import asyncio
 import hashlib
@@ -25,7 +29,8 @@ import secrets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from k1_web.control import ArmController, CommandError
+from k1_web.control import ArmController, CommandError, validate_positions
+from k1_web.policy import AgentPolicy
 from k1_web.poses import PoseStore
 
 COOKIE_NAME = "k1_session"
@@ -41,9 +46,12 @@ QUESTION_KINDS = ("ask", "confirm", "reset")
 
 class WebConfig:
     def __init__(self, token: str, static_dir: str, state_rate_hz: float = 20.0,
-                 video_max_fps: float = 15.0, secure_cookie: bool = False, admin_password: str = ""):
+                 video_max_fps: float = 15.0, secure_cookie: bool = False, admin_password: str = "",
+                 agent_token: str = "", agent_policy: AgentPolicy | None = None):
         self.token = token
         self.admin_password = admin_password     # optional second password (K1_WEB_ADMIN_PASSWORD), "" = off
+        self.agent_token = agent_token           # optional agent-only token (K1_WEB_AGENT_TOKEN), "" = off
+        self.agent_policy = agent_policy or AgentPolicy()
         self.static_dir = static_dir
         self.state_rate_hz = state_rate_hz
         self.video_max_fps = video_max_fps
@@ -53,25 +61,37 @@ class WebConfig:
 def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: WebConfig) -> FastAPI:
     if not config.token:
         raise ValueError("an auth token is required")
+    if config.agent_token and config.agent_token in (config.token, config.admin_password):
+        raise ValueError("the agent token must differ from the main token and the admin password")
+    policy = config.agent_policy
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     # the cookie holds a value derived from the token, not the token itself
     session_value = hmac.new(config.token.encode(), b"k1_web_session", hashlib.sha256).hexdigest()
 
     def is_valid_secret(value: str) -> bool:
+        """The main token or the admin password: a person's credentials (the page's login)."""
         valid = secrets.compare_digest(value, config.token)
         if config.admin_password:
             valid |= secrets.compare_digest(value, config.admin_password)
         return valid
 
-    def is_authenticated(conn) -> bool:
+    def token_role(conn) -> str | None:
+        """'human' for the cookie, the token or the admin password; 'agent' for the agent token; None if neither."""
         cookie = conn.cookies.get(COOKIE_NAME, "")
         if cookie and secrets.compare_digest(cookie, session_value):
-            return True
+            return "human"
         auth = conn.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
-            return is_valid_secret(auth[7:].strip())
-        return False
+            value = auth[7:].strip()
+            if is_valid_secret(value):
+                return "human"
+            if config.agent_token and secrets.compare_digest(value, config.agent_token):
+                return "agent"
+        return None
+
+    def is_authenticated(conn) -> bool:
+        return token_role(conn) is not None
 
     def require_auth(request: Request):
         if not is_authenticated(request):
@@ -81,7 +101,7 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
 
     @app.get("/")
     async def index(request: Request):
-        page = "index.html" if is_authenticated(request) else "login.html"
+        page = "index.html" if token_role(request) == "human" else "login.html"
         return FileResponse(os.path.join(config.static_dir, page), headers={"Cache-Control": "no-store"})
 
     @app.get("/static/{name}")
@@ -152,10 +172,14 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
                 return c["status"]
         return None
 
-    def state_message() -> dict:
+    def state_message(conn: dict | None = None) -> dict:
         roles = [c["role"] for c in clients.values()]
-        return {"type": "state", **controller.snapshot(), "poses": poses.names(),
-                "clients": {role: roles.count(role) for role in CLIENT_ROLES}, "agent": agent_status()}
+        state = {"type": "state", **controller.snapshot(), "poses": poses.names(),
+                 "clients": {role: roles.count(role) for role in CLIENT_ROLES}, "agent": agent_status(),
+                 "agent_policy": policy.summary()}
+        if conn is not None and conn["role"] == "agent":       # an agent sees the bounds it is held to
+            state["limits_min"], state["limits_max"] = policy.limits(state["limits_min"], state["limits_max"])
+        return state
 
     async def send_to(role: str, msg: dict):
         for client in list(clients.values()):
@@ -193,10 +217,19 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             role = msg.get("role")
             if role not in CLIENT_ROLES:
                 raise CommandError(f"'role' must be one of {list(CLIENT_ROLES)}")
+            if conn["token_role"] == "agent" and role != "agent":
+                raise CommandError("the agent token can only connect as an agent")
             conn["role"] = role
             return None
+        agent = conn["role"] == "agent"
+        if agent:
+            policy.check(kind)
         if kind == "goal":
-            controller.set_goal(msg.get("positions"))
+            positions = msg.get("positions")
+            if agent:
+                positions = policy.clamp_goal(validate_positions(positions), controller.limits_min,
+                                              controller.limits_max)
+            controller.set_goal(positions, max_velocity=policy.max_velocity if agent else None)
             return None
         if kind == "gripper":
             controller.set_gripper(msg.get("value"))
@@ -208,7 +241,9 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
             return None
         if kind == "pose":
             pose = poses.get(msg.get("name"))
-            controller.set_goal(pose["joints"])
+            if agent:
+                policy.check_pose(pose["joints"], controller.limits_min, controller.limits_max)
+            controller.set_goal(pose["joints"], max_velocity=policy.max_velocity if agent else None)
             if pose["gripper"] is not None:
                 controller.set_gripper(pose["gripper"])
             return None
@@ -255,7 +290,7 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
                 raise CommandError(f"'models' must be a list of at most {MAX_AGENT_MODELS} names")
             conn["status"] = {k: (bool(v) if k == "allow_motion" else [str(m)[:200] for m in v] if k == "models"
                                   else str(v)[:200]) for k, v in status.items()
-                              if k in ("state", "task", "provider", "model", "models", "allow_motion")}
+                              if k in ("state", "task", "provider", "model", "models", "allow_motion", "profile")}
             return None
         if kind == "agent_question":       # agent -> humans
             require_role(conn, "agent", kind)
@@ -277,7 +312,8 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
 
     @app.websocket("/ws")
     async def ws(websocket: WebSocket):
-        if not is_authenticated(websocket):
+        role = token_role(websocket)
+        if role is None:
             await websocket.close(code=1008)    # policy violation
             return
         await websocket.accept()
@@ -289,10 +325,11 @@ def create_app(controller: ArmController, poses: PoseStore, enable_fn, config: W
 
         async def send_state():
             while True:
-                await send(state_message())
+                await send(state_message(conn))
                 await asyncio.sleep(1.0 / config.state_rate_hz)
 
-        conn = {"role": "human", "send": send}
+        # the agent token is always an agent; the main token is a person until it says otherwise
+        conn = {"role": role, "token_role": role, "send": send}
         clients[id(conn)] = conn
         controller.client_connected()
         sender = asyncio.create_task(send_state())

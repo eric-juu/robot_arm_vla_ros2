@@ -33,7 +33,9 @@ class StoppedByOperator(Exception):
 
 
 def default_token() -> str:
-    return os.environ.get("K1_WEB_TOKEN") or os.environ.get("K1_WEB_ADMIN_PASSWORD", "")
+    """The agent's own token if there is one (k1_web always treats it as an agent), else the main token."""
+    return (os.environ.get("K1_WEB_AGENT_TOKEN") or os.environ.get("K1_WEB_TOKEN")
+            or os.environ.get("K1_WEB_ADMIN_PASSWORD", ""))
 
 
 class K1Client:
@@ -46,7 +48,7 @@ class K1Client:
         self.ws_url = "ws" + self.http_url[len("http"):] + "/ws"
         self.token = token if token is not None else default_token()
         if not self.token:
-            raise K1Error("no token: set K1_WEB_TOKEN (or K1_WEB_ADMIN_PASSWORD)")
+            raise K1Error("no token: set K1_WEB_AGENT_TOKEN or K1_WEB_TOKEN (or K1_WEB_ADMIN_PASSWORD)")
         self.role = role
         self.heartbeat_sec = heartbeat_sec
         self.timeout = timeout

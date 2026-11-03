@@ -9,6 +9,7 @@ from k1_agent.primitives import Primitives
 from k1_agent.skills import SkillLibrary
 from k1_agent.tools import ArmToolbox
 from k1_agent.trace import Trace
+from conftest import motors_on
 
 SWEEP = "def run(k1):\n    r = k1.move_joint_delta('shoulder_pan', 0.1)\n    return r['ok']\n"
 
@@ -16,7 +17,7 @@ SWEEP = "def run(k1):\n    r = k1.move_joint_delta('shoulder_pan', 0.1)\n    ret
 @pytest.fixture
 def k1(live_server):
     with K1Client(live_server["url"], live_server["token"]) as client:
-        live_server["sim"].reset([0.0] * 6)
+        motors_on(live_server, client)
         yield client
 
 

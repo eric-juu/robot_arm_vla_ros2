@@ -66,13 +66,16 @@ def free_port() -> int:
 class SimServer:
 
     def __init__(self, limits=1.0, max_velocity: float = 1.0, poses: dict | None = None, token: str | None = None,
-                 workdir: str | None = None):
+                 workdir: str | None = None, agent_policy: dict | None = None):
+        """`agent_policy`: k1_web's AgentPolicy fields (allow_enable, free_motion, limits_min/max, max_velocity);
+        the defaults are the real server's. The policy object stays reachable as `self.agent_policy`."""
         import_k1_web()
         import tempfile
 
         import uvicorn
         import yaml
         from k1_web.control import ArmController
+        from k1_web.policy import AgentPolicy
         from k1_web.poses import PoseStore
         from k1_web.server import WebConfig, create_app
 
@@ -100,7 +103,9 @@ class SimServer:
             self.controller.set_enabled(value)
             return True, "motors enabled" if value else "motors disabled"
 
-        app = create_app(self.controller, self.poses, enable_fn, WebConfig(self.token, static, state_rate_hz=50.0))
+        self.agent_policy = AgentPolicy(**(agent_policy or {}))
+        app = create_app(self.controller, self.poses, enable_fn,
+                         WebConfig(self.token, static, state_rate_hz=50.0, agent_policy=self.agent_policy))
         self.port = free_port()
         self.url = f"http://127.0.0.1:{self.port}"
         self._server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=self.port, log_level="warning"))

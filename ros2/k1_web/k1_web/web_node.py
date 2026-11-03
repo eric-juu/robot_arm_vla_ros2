@@ -44,6 +44,7 @@ import uvicorn
 
 from k1_web.control import N_ARM_JOINTS, URDF_JOINT_NAMES, ArmController, CommandError
 from k1_web.image import rotate_jpeg_180
+from k1_web.policy import AgentPolicy
 from k1_web.poses import PoseStore
 from k1_web.server import WebConfig, create_app
 from k1_web.trajectory import Trajectory, outside_limits, tolerances, within
@@ -85,6 +86,17 @@ class K1WebNode(Node):
         self.ready_timeout = self.declare_parameter("ready_timeout_sec", 1.0).value
         self.gripper_settle = self.declare_parameter("gripper_settle_sec", 1.0).value
         self.gripper_tolerance = self.declare_parameter("gripper_tolerance_m", 0.004).value
+        # what AI agents may do (policy.py). ROS can't declare an empty list, so agent limits of anything but 6
+        # values (the default [0.0]) mean "the arm's own limits", and a velocity of 0.0 "the arm's own speed"
+        agent_min = list(self.declare_parameter("agent_joint_limits_min", [0.0]).value)
+        agent_max = list(self.declare_parameter("agent_joint_limits_max", [0.0]).value)
+        self.agent_policy = AgentPolicy(
+            allow_motion=self.declare_parameter("agent_allow_motion", True).value,
+            allow_enable=self.declare_parameter("agent_allow_enable", False).value,
+            free_motion=self.declare_parameter("agent_free_motion", True).value,
+            limits_min=agent_min if len(agent_min) == N_ARM_JOINTS else None,
+            limits_max=agent_max if len(agent_max) == N_ARM_JOINTS else None,
+            max_velocity=self.declare_parameter("agent_max_joint_velocity", 0.0).value)
         self.max_joint_velocity = max_joint_velocity
         self.static_dir = os.path.join(share, "static")
 
@@ -120,6 +132,7 @@ class K1WebNode(Node):
         self.get_logger().info(
             f"limits min {limits_min} max {limits_max} rad, max velocity {max_joint_velocity} rad/s, "
             f"poses {self.poses.names()}")
+        self.get_logger().info(f"agent policy: {self.agent_policy.summary()}")
 
     def on_joint_state(self, msg: JointState):
         self.controller.on_joint_state(msg.name, msg.position)
@@ -321,6 +334,9 @@ def main(args=None):
     admin_password = os.environ.get("K1_WEB_ADMIN_PASSWORD", "").strip()
     if admin_password:
         node.get_logger().warning("K1_WEB_ADMIN_PASSWORD is set: it is accepted at login like the token")
+    agent_token = os.environ.get("K1_WEB_AGENT_TOKEN", "").strip()
+    if agent_token:
+        node.get_logger().info("K1_WEB_AGENT_TOKEN is set: connections with it are always agents")
 
     executor = MultiThreadedExecutor()
     executor.add_node(node)
@@ -328,7 +344,7 @@ def main(args=None):
     spin_thread.start()
 
     config = WebConfig(token, node.static_dir, node.state_rate_hz, node.video_max_fps, node.secure_cookie,
-                       admin_password)
+                       admin_password, agent_token, node.agent_policy)
     app = create_app(node.controller, node.poses, node.set_enabled, config)
     node.get_logger().info(f"serving on http://{node.host}:{node.port}")
     try:

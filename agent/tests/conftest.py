@@ -24,3 +24,9 @@ def live_server(tmp_path):
     sim.reset([0.0] * 6, enabled=False)     # motors off, as after a real bringup
     yield {"url": sim.url, "token": TOKEN, "controller": sim.controller, "sim": sim, "runs": str(tmp_path / "runs")}
     sim.stop()
+
+
+def motors_on(live_server, client, joints=None):
+    """Enable the simulated arm (as a person would from the page) and wait until `client` has seen it."""
+    live_server["sim"].reset(joints or [0.0] * 6, enabled=True)
+    assert client.wait_for(lambda s: s.get("ready"), timeout=3.0, after_seq=client.state_seq)

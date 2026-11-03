@@ -10,6 +10,7 @@ from k1_agent.runner import AgentRunner, extract_code, prune_images
 from k1_agent.skills import SkillLibrary
 from k1_agent.tools import ArmToolbox
 from k1_agent.trace import Trace
+from conftest import motors_on
 
 
 class FakeProvider(Provider):
@@ -52,7 +53,7 @@ def setup(live_server, tmp_path):
         f.write("---\nname: k1-basics\ndescription: joint conventions\n---\nshoulder_pan turns the base.\n")
     with K1Client(live_server["url"], live_server["token"]) as k1:
         prims = Primitives(k1, Trace(live_server["runs"], "run"), allow_motion=True, allow_enable=True)
-        assert prims.enable()["ok"]
+        motors_on(live_server, k1)
         yield prims, skills
 
 

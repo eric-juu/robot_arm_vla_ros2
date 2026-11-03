@@ -18,6 +18,7 @@ from k1_agent.service import AgentService
 from k1_agent.skills import SkillLibrary
 from k1_agent.tools import ArmToolbox
 from k1_agent.trace import Trace
+from conftest import motors_on
 
 
 class ScriptedProvider(Provider):
@@ -57,7 +58,7 @@ class Page:
 def test_prompt_from_the_page_runs_a_task_and_asks_questions(live_server, tmp_path):
     page = Page(live_server)
     with K1Client(live_server["url"], live_server["token"]) as k1:
-        assert Primitives(k1, allow_enable=True).enable()["ok"]
+        motors_on(live_server, k1)
         provider = ScriptedProvider([
             Reply("", [ToolCall("1", "ask_operator", {"question": "Where is the cup?"})]),
             Reply("", [ToolCall("2", "move_joint_delta", {"joint": "shoulder_pan", "delta": 0.1})]),

@@ -6,6 +6,7 @@ import pytest
 from k1_agent.client import K1Client, StoppedByOperator
 from k1_agent.primitives import Primitives
 from k1_agent.trace import Trace
+from conftest import motors_on
 
 
 @pytest.fixture
@@ -28,9 +29,17 @@ def test_interlocks(k1, live_server):
     assert prims.stop()["ok"]                                        # always allowed
 
 
+def test_enable_needs_both_the_flag_and_the_server(k1, live_server):
+    prims, _ = make(k1, live_server, allow_enable=True)
+    result = prims.enable()
+    assert result["error"] == "rejected" and "agent_allow_enable" in result["message"]   # k1_web's own policy
+    live_server["sim"].agent_policy.allow_enable = True
+    assert prims.enable()["ok"] and k1.state["enabled"]
+
+
 def test_moves_traces_and_budget(k1, live_server):
-    prims, trace = make(k1, live_server, allow_motion=True, allow_enable=True, max_steps=4)
-    assert prims.enable()["ok"]
+    prims, trace = make(k1, live_server, allow_motion=True, max_steps=4)
+    motors_on(live_server, k1)
 
     obs = prims.observe()
     assert obs["ok"] and obs["image"].startswith(b"\xff\xd8") and obs["joints"]["shoulder_pan"] == 0.0
@@ -50,14 +59,14 @@ def test_moves_traces_and_budget(k1, live_server):
 
     lines = [json.loads(line) for line in open(trace.path, encoding="utf-8")]
     names = [e["name"] for e in lines]
-    assert names[:3] == ["enable", "observe", "move_joints"] and "go_pose" in names
+    assert names[:2] == ["observe", "move_joints"] and "go_pose" in names
     assert all(os.path.exists(os.path.join(trace.dir, e["frame"])) for e in lines if "frame" in e)
-    assert "image" not in lines[1]["result"]
+    assert "image" not in lines[0]["result"]
 
 
 def test_human_stop_aborts(k1, live_server):
-    prims, _ = make(k1, live_server, allow_motion=True, allow_enable=True)
-    prims.enable()
+    prims, _ = make(k1, live_server, allow_motion=True)
+    motors_on(live_server, k1)
     with K1Client(live_server["url"], live_server["token"], role="human") as human:
         human.request({"type": "stop"})
         with pytest.raises(StoppedByOperator):

@@ -89,6 +89,7 @@ class ArmController:
         self._enabled = False
         self._commanded: list[float] | None = None   # None until seeded from a fresh joint state
         self._goal: list[float] | None = None
+        self._goal_velocity: float | None = None     # a lower speed cap for the current goal (agent goals)
         self._gripper: float | None = None           # last gripper value sent
         self._pending_gripper: float | None = None
         self._goal_seq = 0                            # counts goal changes, so a trajectory notices interruptions
@@ -146,12 +147,14 @@ class ArmController:
         if self._commanded is None:
             raise CommandError("waiting for a fresh joint state from the arm")
 
-    def set_goal(self, positions) -> int:
-        """Sets the goal, clamped to the limits. Returns the new goal sequence number."""
+    def set_goal(self, positions, max_velocity: float | None = None) -> int:
+        """Sets the goal, clamped to the limits, optionally at a lower speed than max_velocity.
+        Returns the new goal sequence number."""
         positions = validate_positions(positions)
         with self._lock:
             self._require_ready()
             self._goal = clamp(positions, self.limits_min, self.limits_max)
+            self._goal_velocity = max_velocity
             self._goal_seq += 1
             return self._goal_seq
 
@@ -239,7 +242,8 @@ class ArmController:
 
             arm = None
             if self._goal != self._commanded:
-                self._commanded = step_toward(self._commanded, self._goal, self.max_velocity * dt)
+                speed = self.max_velocity if self._goal_velocity is None else min(self.max_velocity, self._goal_velocity)
+                self._commanded = step_toward(self._commanded, self._goal, speed * dt)
                 arm = list(self._commanded)
 
             gripper = self._pending_gripper

@@ -25,3 +25,11 @@ k1_web:
     gripper_settle_sec: 1.0     # how long a gripper goal waits for the fingers
     gripper_tolerance_m: 0.004  # finger error below which the gripper counts as reached (otherwise "stalled")
     secure_cookie: false        # cookies are already https-only through the tunnel; true forces it for every request
+    # What AI agents may do, enforced here whatever the agent's own flags say (see k1_web/policy.py).
+    # An agent signs in with K1_WEB_TOKEN, or better with its own K1_WEB_AGENT_TOKEN (agents only).
+    agent_allow_motion: true    # false: agents may look but never move the arm
+    agent_allow_enable: false   # true: agents may enable/release the motors (k1-agent --allow-enable needs it)
+    agent_free_motion: true     # false ("operate"): agents may only replay saved poses and use the gripper
+    agent_joint_limits_min: [0.0]   # 6 values: tighter bounds for agents (a station keep-out); [0.0] = the limits above
+    agent_joint_limits_max: [0.0]
+    agent_max_joint_velocity: 0.0   # rad/s cap for agent goals; 0.0 = max_joint_velocity
