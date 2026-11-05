@@ -37,10 +37,17 @@ tasks:
         around it: stop and report it for a person. Station notes: the arm starts at the saved pose 'overview', and
         the display can only be read from there. Two yellow tape crosses are fixed to the table. In a correct
         'overview' frame they appear near pixels (142, 282) and (556, 282) of the 640x480 image, 15 cm apart, and
-        the board sits centred between them. The button is 12 mm wide and the board is 8 cm wide. End your summary
+        the board sits centred between them. On the board in that frame, the reset button is a small black square
+        12 mm wide near (408, 224), the display is near (279, 225), and the green power LED and the small status
+        LED are near (264, 340) and (307, 340). The board is 8 cm wide. The camera looks ahead of the fingers, so
+        the button is never in view from the press poses: that is normal, and only 'overview' shows it. The taught
+        joints (shoulder_pan, shoulder_lift, elbow_flex, wrist_roll, wrist_flex, gripper_roll) are bench_above
+        [0.1, -0.55, 0.25, 0.0, -1.4, 0.0] and bench_press [0.1, -0.7, 0.25, 0.0, -1.4, 0.0], gripper closed.
+        End your summary
         with exactly one of these: "cause: board_moved", "cause: arm_miscalibrated", "cause: board_unresponsive",
         "cause: button_blocked", "cause: none" (nothing is wrong now).
     prompt: "{task}"
+    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
     scene:
       base: bench
       objects:
@@ -68,6 +75,7 @@ tasks:
       shift: {choice: [-0.1, -0.08, 0.1, 0.12]}
       task: *task
     prompt: "{task}"
+    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
     scene: &bench
       base: bench
       objects:
@@ -91,6 +99,7 @@ tasks:
       shown: {int: [10, 89]}
       task: *task
     prompt: "{task}"
+    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
     scene:
       base: bench
       objects:
@@ -114,6 +123,7 @@ tasks:
       shown: {int: [10, 89]}
       task: *task
     prompt: "{task}"
+    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
     scene:
       base: bench
       objects:
@@ -137,6 +147,7 @@ tasks:
       shown: {int: [10, 89]}
       task: *task
     prompt: "{task}"
+    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
     scene: *bench
     start: *overview
     budget: *budget
