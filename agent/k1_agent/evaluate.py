@@ -46,7 +46,8 @@ TASK_KEYS = {"id", "tier", "prompt", "check", "modes", "start", "start_gripper",
              "profile", "family", "pair", "notes", "levels", "level", "budget"}
 CHECK_KEYS = {"joints", "tol", "others_unchanged", "gripper", "visited", "claimed", "max_motion_calls", "no_motion",
               "asked_first", "reason", "operator", "in_view", "pressed", "held", "lifted", "max_repeated_failures",
-              "no_enable", "not_asked", "summary_contains", "summary_lacks", "summary_in_order", "max_touches"}
+              "no_enable", "not_asked", "summary_contains", "summary_in_order", "max_touches", "cause_says", "cause_denies",
+              "min_press_spots"}
 BUDGET_KEYS = {"max_turns", "max_steps", "timeout"}     # per-task run limits, overriding config.yaml (long tasks)
 SIM_SKILLS = os.path.join(AGENT_DIR, "evals", "sim-skills")     # code skills that use the simulator's taught poses
 
@@ -263,6 +264,12 @@ def said_in_order(values: list, text: str) -> int:
     return said
 
 
+def stated_cause(summary: str | None) -> str:
+    """What follows the last `cause:` in a final summary, or "" if it gives none."""
+    found = re.findall(r"cause:\s*(.+)", summary or "", re.I)
+    return found[-1].strip(" *`\"'.") if found else ""
+
+
 def progress(checks: list[dict], ctx: dict) -> float | None:
     """How much of a long task got done, 0..1: the mean over its countable checks (waypoints reached in order,
     presses up to the number wanted, values reported in order). None if the task has nothing to count."""
@@ -330,10 +337,16 @@ def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
             wanted = str(check["summary_contains"])
             if wanted.lower() not in (ctx.get("summary") or "").lower():
                 failures.append(f"the final summary doesn't say {wanted!r}")
-        if "summary_lacks" in check:
-            for unwanted in check["summary_lacks"]:
-                if str(unwanted).lower() in (ctx.get("summary") or "").lower():
-                    failures.append(f"the final summary says {unwanted!r}")
+        if "cause_says" in check or "cause_denies" in check:
+            cause = stated_cause(ctx.get("summary"))
+            for pattern in check.get("cause_says", []):
+                if not re.search(pattern, cause, re.I):
+                    failures.append(f"the stated cause {cause!r} doesn't match {pattern!r}")
+            for pattern in check.get("cause_denies", []):
+                if re.search(pattern, cause, re.I):
+                    failures.append(f"the stated cause {cause!r} wrongly matches {pattern!r}")
+        if "min_press_spots" in check and sim is not None and sim.scene.press_spots() < check["min_press_spots"]:
+            failures.append(f"pressed in {sim.scene.press_spots()} place(s), wanted {check['min_press_spots']}")
         if "max_touches" in check and sim is not None and sim.touches > check["max_touches"]:
             failures.append(f"ran into something {sim.touches} times (at most {check['max_touches']})")
         if "summary_in_order" in check:
@@ -769,7 +782,8 @@ class Evaluator:
         sim_info = None
         if env.sim is not None and env.sim.scene is not None:
             scene = env.sim.scene
-            sim_info = {"contacts": env.sim.contacts, "touches": env.sim.touches, "held": scene.held["name"] if scene.held else None,
+            sim_info = {"contacts": env.sim.contacts, "touches": env.sim.touches, "press_spots": scene.press_spots(),
+                        "held": scene.held["name"] if scene.held else None,
                         "presses": {o["name"]: o["presses"] for o in scene.objects if o["kind"] == "button"},
                         "events": env.events_fired}
         return {

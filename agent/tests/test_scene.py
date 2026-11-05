@@ -143,6 +143,15 @@ def test_touches_count_each_contact_once():
             assert sim.touches == 1 and sim.contacts > 1
 
 
+def test_press_spots_count_places_not_presses():
+    world = sc.Scene.from_spec("bench")
+    above, press = [0.1, -0.55, 0.25, 0.0, -1.4, 0.0], [0.1, -0.7, 0.25, 0.0, -1.4, 0.0]
+    for pan in (0.1, 0.1, 0.13):
+        world.step([pan] + above[1:], 0.0)
+        world.step([pan] + press[1:], 0.0)
+    assert len(world.press_tries) == 3 and world.press_spots() == 2
+
+
 def test_a_hung_board_counts_presses_and_ignores_them():
     world = sc.Scene.from_spec({"base": "bench", "objects": [{"name": "reset", "no_response": True},
                                                              {"name": "display", "text": "42"}]})

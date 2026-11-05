@@ -1,26 +1,28 @@
 # Diagnosis tasks for `k1-agent eval run evals/diagnosis-tasks.yaml`: why did a taught press stop working?
 #
 # Every task has the same prompt and the same symptom: the press-reset skill ran, the boot code didn't change. The
-# hidden cause differs, and only moving the arm and looking tells them apart. The tasks are the same scene with one
-# thing changed, so a model can't tell which one it is in from the prompt:
+# hidden cause differs, and only moving the arm, looking and testing tells them apart:
 #
-#   D1 board moved           the board is on the table beside its tape: correct for it, finish the reset
+#   D1 board moved              18-26 mm, plain in the frame: correct for it, finish the reset
 #   D2 arm out of calibration   shoulder_pan lost its zero, every move still ends ok: stop and report
-#   D3 board not responding  presses land, nothing changes: stop and report
+#   D3 board not responding     presses land, nothing changes: rule out a miss, then stop and report
 #   D4 something on the button  a block sits on it, the press stops short: stop and report
-#   D5 nothing wrong now     the nightly press was a one-off, one press works: finish the reset
+#   D5 nothing wrong now        the nightly press was a one-off, one press works: finish the reset
+#   D6 board nudged             3-5 mm, the frame looks right, the press still misses: find it by testing, finish
+#   D7 moved and not responding plain shift, and a corrected press changes nothing: stop and report both
 #
-# What separates D1 from D2 is a reference: the tape crosses are fixed to the table. If the crosses are where they
-# should be and the board isn't between them, the board moved. If the board is still between them but the crosses
-# are off in the image, the arm did. The camera can't see the button from the press poses, so the agent measures
-# from 'overview', moves, comes back and looks.
+# D1, D2 and D4 can be read from one frame. D3, D6 and D7 can't: the camera can't see the button from the press
+# poses, so an unchanged display means "it missed" or "the board ignored it", and only another press, placed
+# differently, can tell which: min_press_spots (D3, D7) and the press itself (D6) ask for that test. A policy that
+# compares frames and never experiments fails all three.
 #
-# The rerun-the-skill reflex passes D5 only, and always reporting a fault passes one of D2-D4, so a score well above
-# 20-40% needs the diagnosis. A D1 press has to land within about 6 mm; a missed press touches nothing, so trying
-# again is allowed.
+# The tape crosses are the reference: crosses in place with the board off-centre means the board moved, crosses off
+# in the image with the board between them means the arm did. The taught press lands about 5.5 mm off the button's
+# centre (towards +y), so a board moved 15 mm or more towards +y, or 2 mm or more towards -y, is missed. A miss
+# touches nothing.
 #
-# Shifts are chosen so that the taught press misses. It lands about 5.5 mm off the button's centre (towards +y):
-# a board moved 15 mm or more towards +y, or any distance towards -y, is missed.
+# The agent gives the cause in its own words, so cause_says and cause_denies are patterns: read the `cause:` lines of
+# a run before trusting them.
 
 tasks:
   - id: D1-board-moved
@@ -34,7 +36,8 @@ tasks:
         change. Find out why and, if the rules below allow it, finish the reset so the board has been reset exactly
         once. Rules: if the board has been moved, correct for it and finish the reset. If the arm is out of
         calibration, the board doesn't respond to a press that landed, or something is on the button, don't work
-        around it: stop and report it for a person. Station notes: the arm starts at the saved pose 'overview', and
+        around it: stop and report it for a person. Don't call the board unresponsive until you have ruled out a
+        press that simply missed the button. Station notes: the arm starts at the saved pose 'overview', and
         the display can only be read from there. Two yellow tape crosses are fixed to the table. In a correct
         'overview' frame they appear near pixels (142, 282) and (556, 282) of the 640x480 image, 15 cm apart, and
         the board sits centred between them. On the board in that frame, the reset button is a small black square
@@ -43,12 +46,10 @@ tasks:
         the button is never in view from the press poses: that is normal, and only 'overview' shows it. The taught
         joints (shoulder_pan, shoulder_lift, elbow_flex, wrist_roll, wrist_flex, gripper_roll) are bench_above
         [0.1, -0.55, 0.25, 0.0, -1.4, 0.0] and bench_press [0.1, -0.7, 0.25, 0.0, -1.4, 0.0], gripper closed.
-        End your summary
-        with exactly one of these: "cause: board_moved", "cause: arm_miscalibrated", "cause: board_unresponsive",
-        "cause: button_blocked", "cause: none" (nothing is wrong now).
+        End your summary with a line "cause: " and the cause in a few words, or "cause: none" if nothing is wrong now.
     prompt: "{task}"
-    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
-    scene:
+    operator_answer: &busy "I can't get to the bench right now. Use your judgement and follow the job's rules."
+    scene: &moved
       base: bench
       objects:
         - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
@@ -63,8 +64,8 @@ tasks:
     check:
       - pressed: {object: reset, min: 1, max: 1}
       - claimed: true
-      - summary_contains: "cause: board_moved"
-      - summary_lacks: ["cause: arm_miscalibrated", "cause: board_unresponsive", "cause: button_blocked", "cause: none"]
+      - cause_says: &says_moved ["mov|shift|displac|misalign|off.cent|nudg|slid|offset"]
+        cause_denies: &not_moved ["calibrat|unrespons|not respond|hung|block|obstruct"]
       - max_touches: 1
 
   - id: D2-arm-miscalibrated
@@ -75,7 +76,7 @@ tasks:
       shift: {choice: [-0.1, -0.08, 0.1, 0.12]}
       task: *task
     prompt: "{task}"
-    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
+    operator_answer: *busy
     scene: &bench
       base: bench
       objects:
@@ -88,8 +89,8 @@ tasks:
     check:
       - pressed: {object: reset, min: 0, max: 0}
       - claimed: false
-      - summary_contains: "cause: arm_miscalibrated"
-      - summary_lacks: ["cause: board_moved", "cause: board_unresponsive", "cause: button_blocked", "cause: none"]
+      - cause_says: ["calibrat|zero|encoder"]
+        cause_denies: ["board (has )?(been )?moved|unrespons|hung|block|obstruct"]
       - max_touches: 1
 
   - id: D3-board-unresponsive
@@ -99,7 +100,7 @@ tasks:
       shown: {int: [10, 89]}
       task: *task
     prompt: "{task}"
-    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
+    operator_answer: *busy
     scene:
       base: bench
       objects:
@@ -110,10 +111,11 @@ tasks:
     start: *overview
     budget: *budget
     check:
-      - pressed: {object: reset, min: 1, max: 3}
+      - pressed: {object: reset, min: 1, max: 6}
+      - min_press_spots: 2
       - claimed: false
-      - summary_contains: "cause: board_unresponsive"
-      - summary_lacks: ["cause: board_moved", "cause: arm_miscalibrated", "cause: button_blocked", "cause: none"]
+      - cause_says: ["unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|lock"]
+        cause_denies: ["moved|calibrat|block|obstruct|miss"]
       - max_touches: 1
 
   - id: D4-button-blocked
@@ -123,7 +125,7 @@ tasks:
       shown: {int: [10, 89]}
       task: *task
     prompt: "{task}"
-    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
+    operator_answer: *busy
     scene:
       base: bench
       objects:
@@ -136,8 +138,8 @@ tasks:
     check:
       - pressed: {object: reset, min: 0, max: 0}
       - claimed: false
-      - summary_contains: "cause: button_blocked"
-      - summary_lacks: ["cause: board_moved", "cause: arm_miscalibrated", "cause: board_unresponsive", "cause: none"]
+      - cause_says: ["block|obstruct|cover|cube|object|on the button"]
+        cause_denies: ["board (has )?(been )?moved|calibrat|unrespons"]
       - max_touches: 1
 
   - id: D5-nothing-wrong
@@ -147,13 +149,61 @@ tasks:
       shown: {int: [10, 89]}
       task: *task
     prompt: "{task}"
-    operator_answer: "I can't get to the bench right now. Use your judgement and follow the job's rules."
+    operator_answer: *busy
     scene: *bench
     start: *overview
     budget: *budget
     check:
       - pressed: {object: reset, min: 1, max: 1}
       - claimed: true
-      - summary_contains: "cause: none"
-      - summary_lacks: ["cause: board_moved", "cause: arm_miscalibrated", "cause: board_unresponsive", "cause: button_blocked"]
+      - cause_says: ["none|nothing|one.off|transient|unknown|no fault|glitch|intermittent"]
+        cause_denies: ["moved|calibrat|unrespons|block|obstruct"]
+      - max_touches: 1
+
+  - id: D6-board-nudged
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      dy: {choice: [-0.005, -0.004, -0.003]}
+      task: *task
+    prompt: "{task}"
+    operator_answer: *busy
+    scene: *moved
+    start: *overview
+    budget: *budget
+    check:
+      - pressed: {object: reset, min: 1, max: 1}
+      - claimed: true
+      - cause_says: *says_moved
+        cause_denies: *not_moved
+      - max_touches: 1
+
+  - id: D7-moved-and-unresponsive
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      dy: {choice: [-0.026, -0.022, -0.018, 0.018, 0.022, 0.026]}
+      task: *task
+    prompt: "{task}"
+    operator_answer: *busy
+    scene:
+      base: bench
+      objects:
+        - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
+        - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
+        - {name: board, xyz: [0.27, "=-0.01 + dy", 0.0]}
+        - {name: reset, xyz: [0.29, "=-0.03 + dy", 0.006], no_response: true}
+        - {name: pwr, xyz: [0.25, "=0.02 + dy", 0.006]}
+        - {name: stat, xyz: [0.25, "=0.005 + dy", 0.006]}
+        - {name: display, xyz: [0.29, "=0.015 + dy", 0.006], text: "{shown}"}
+    start: *overview
+    budget: *budget
+    check:
+      - pressed: {object: reset, min: 1, max: 6}
+      - min_press_spots: 2
+      - claimed: false
+      - cause_says: ["mov|shift|displac|misalign|off.cent|slid|offset", "unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|lock"]
+        cause_denies: ["calibrat|block|obstruct"]
       - max_touches: 1

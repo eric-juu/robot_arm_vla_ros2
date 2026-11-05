@@ -428,9 +428,12 @@ def test_diagnosis_checks():
         touches = 2
         scene = None
 
-    said = ctx(summary="the board moved. cause: board_moved", sim=Sim())
-    assert ev.check_trial([{"summary_lacks": ["cause: none"]}], said)[0]
-    assert not ev.check_trial([{"summary_lacks": ["CAUSE: BOARD_MOVED"]}], said)[0]
+    said = ctx(summary="Not an unresponsive board, in the end.\n\n**cause: the board Moved 2 cm.**", sim=Sim())
+    assert ev.stated_cause(said["summary"]) == "the board Moved 2 cm"
+    assert ev.check_trial([{"cause_says": ["moved"], "cause_denies": ["unrespons"]}], said)[0]
+    assert not ev.check_trial([{"cause_says": ["moved", "hung"]}], said)[0]
+    assert not ev.check_trial([{"cause_denies": ["board"]}], said)[0]
+    assert not ev.check_trial([{"cause_says": ["moved"]}], ctx(summary="the board moved"))[0]
     assert ev.check_trial([{"max_touches": 2}], said)[0]
     assert "ran into something 2 times" in ev.check_trial([{"max_touches": 1}], said)[1][0]
 
@@ -438,11 +441,17 @@ def test_diagnosis_checks():
 def test_diagnosis_tasks_share_one_prompt():
     tasks = ev.load_suite(os.path.join(ev.AGENT_DIR, "evals", "diagnosis-tasks.yaml"))
     instances = [ev.taskgen.instance(t, 1) for t in tasks]
-    assert len(tasks) == 5 and len({i["prompt"] for i in instances}) == 1
-    causes = ["board_moved", "arm_miscalibrated", "board_unresponsive", "button_blocked", "none"]
-    for instance, cause in zip(instances, causes):
-        wanted = next(c["summary_contains"] for c in instance["check"] if "summary_contains" in c)
-        assert wanted == f"cause: {cause}"
+    assert len(tasks) == 7 and len({i["prompt"] for i in instances}) == 1
+    causes = ["the board moved 2 cm", "arm out of calibration", "board unresponsive", "a block is on the button",
+              "none", "board nudged about 4 mm", "the board moved and is unresponsive"]
+
+    def fits(instance, cause):
+        return ev.check_trial([c for c in instance["check"] if "cause_says" in c], ctx(summary=f"cause: {cause}"))[0]
+
+    for i, instance in enumerate(instances):
+        assert fits(instance, causes[i])
+    assert [c for c in causes if fits(instances[2], c)] == ["board unresponsive"]
+    assert [c for c in causes if fits(instances[6], c)] == ["the board moved and is unresponsive"]
 
 
 def test_shipped_long_tasks_load():

@@ -51,6 +51,7 @@ WIDTH, HEIGHT = 640, 480
 HFOV = math.radians(70.0)
 FOCAL = (WIDTH / 2) / math.tan(HFOV / 2)
 NEAR = 0.01
+PRESS_HEIGHT = 0.014                            # fingertips this low (m) count as a try at pressing
 
 COLORS = {"red": (200, 40, 40), "blue": (40, 80, 200), "green": (40, 150, 70), "yellow": (230, 200, 40),
           "black": (30, 30, 30), "white": (235, 235, 235), "orange": (230, 120, 30), "pcb": (20, 110, 60),
@@ -156,6 +157,8 @@ class Scene:
         self.held: dict | None = None           # {"name", "offset"} while a block is in the gripper
         self.regrasp_needs_open = False         # after a slip, the gripper must open before it can grasp again
         self.version = 0                        # bumps when anything visible changes
+        self.press_tries: list[tuple] = []      # (x, y) of each time the fingertips came down to pressing height
+        self._low = False
 
     @classmethod
     def from_spec(cls, spec) -> "Scene":
@@ -205,6 +208,10 @@ class Scene:
         """Update presses and the held block after the arm moved to `joints` (already free of collisions)."""
         frames = forward(joints)
         tips = finger_points(frames["link6"], gripper) + [frames["grasp"].t]
+        low = [p for p in tips[:2] if p[2] < PRESS_HEIGHT]
+        if low and not self._low:
+            self.press_tries.append((sum(p[0] for p in low) / len(low), sum(p[1] for p in low) / len(low)))
+        self._low = bool(low)
         for obj in self.objects:
             if obj["kind"] == "button":
                 inside = any(self._inside(p, obj) for p in tips)
@@ -234,6 +241,15 @@ class Scene:
             center = grasp.point(self.held["offset"])
             obj["xyz"] = [center[0], center[1], center[2] - obj["size"][2] / 2]
             self.version += 1
+
+    def press_spots(self, gap: float = 0.004) -> int:
+        """How many different places the fingertips came down, at least `gap` metres apart: whether a press was
+        ever placed differently, whatever the button did."""
+        spots: list[tuple] = []
+        for x, y in self.press_tries:
+            if all(math.hypot(x - a, y - b) >= gap for a, b in spots):
+                spots.append((x, y))
+        return len(spots)
 
     def drop(self):
         """The held block slips out and falls to the table (it can be grasped again once the gripper opens)."""

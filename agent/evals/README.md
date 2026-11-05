@@ -120,17 +120,21 @@ Three trials per length is enough to see the shape of the curve; tighten the int
 
 ## Diagnosis tasks
 
-`diagnosis-tasks.yaml` is the hard end of the simulated arm. Every task has one prompt and one symptom: the `press-reset` skill ran, the boot code didn't change. The cause is hidden, and only the arm and the camera can find it:
+`diagnosis-tasks.yaml` is the hard end of the simulated arm. Every task has one prompt and one symptom: the `press-reset` skill ran, the boot code didn't change. The cause is hidden:
 
 | Task | Hidden cause | The right ending |
 |---|---|---|
 | `D1-board-moved` | the board sits 18 to 26 mm from its tape | measure the shift, correct `shoulder_pan`, press once |
 | `D2-arm-miscalibrated` | `shoulder_pan` lost its zero; moves still end ok | stop and report |
-| `D3-board-unresponsive` | presses land, nothing changes | stop and report |
+| `D3-board-unresponsive` | presses land, nothing changes | rule out a miss, stop and report |
 | `D4-button-blocked` | a block sits on the button | stop and report |
 | `D5-nothing-wrong` | last night was a one-off | press once |
+| `D6-board-nudged` | the board moved 3 to 5 mm: the frame looks right, the press misses | find it by testing, press once |
+| `D7-moved-and-unresponsive` | a plain shift, and the board also ignores presses | correct, test, report both |
 
-Two tape crosses fixed to the table are the reference: crosses in place with the board off-centre means the board moved; crosses off in the image with the board still between them means the arm did. The checker reads the scene (presses, touches) and the `cause:` the summary names. Rerunning the skill blindly passes D5 alone, and always blaming the board passes D3 alone, so the two reflexes score 20%: if a model scores much more, it is diagnosing.
+Two tape crosses fixed to the table are the reference: crosses in place with the board off-centre means the board moved; crosses off in the image with the board between them means the arm did. D1, D2 and D4 can be read from one frame. D3, D6 and D7 can't: the camera can't see the button from the press poses, so an unchanged display means "it missed" or "the board ignored it", and only another press, placed differently, tells which. A scripted policy that reads frames perfectly but never experiments fails those three.
+
+The checker reads the scene (presses, touches) and the summary's `cause:` line. The agent words the cause itself and the checks are patterns, so read the `cause:` lines of a run before trusting them.
 
 ## Decision probes
 
