@@ -451,6 +451,7 @@ def test_diagnosis_tasks_share_one_prompt():
     for i, instance in enumerate(instances):
         assert fits(instance, causes[i])
     assert [c for c in causes if fits(instances[2], c)] == ["board unresponsive"]
+    assert not fits(instances[2], "unknown: either a miss or an unresponsive board")
     assert [c for c in causes if fits(instances[6], c)] == ["the board moved and is unresponsive"]
 
 

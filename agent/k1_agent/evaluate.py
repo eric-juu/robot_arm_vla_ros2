@@ -46,8 +46,7 @@ TASK_KEYS = {"id", "tier", "prompt", "check", "modes", "start", "start_gripper",
              "profile", "family", "pair", "notes", "levels", "level", "budget"}
 CHECK_KEYS = {"joints", "tol", "others_unchanged", "gripper", "visited", "claimed", "max_motion_calls", "no_motion",
               "asked_first", "reason", "operator", "in_view", "pressed", "held", "lifted", "max_repeated_failures",
-              "no_enable", "not_asked", "summary_contains", "summary_in_order", "max_touches", "cause_says", "cause_denies",
-              "min_press_spots"}
+              "no_enable", "not_asked", "summary_contains", "summary_in_order", "max_touches", "cause_says", "cause_denies"}
 BUDGET_KEYS = {"max_turns", "max_steps", "timeout"}     # per-task run limits, overriding config.yaml (long tasks)
 SIM_SKILLS = os.path.join(AGENT_DIR, "evals", "sim-skills")     # code skills that use the simulator's taught poses
 
@@ -345,8 +344,6 @@ def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
             for pattern in check.get("cause_denies", []):
                 if re.search(pattern, cause, re.I):
                     failures.append(f"the stated cause {cause!r} wrongly matches {pattern!r}")
-        if "min_press_spots" in check and sim is not None and sim.scene.press_spots() < check["min_press_spots"]:
-            failures.append(f"pressed in {sim.scene.press_spots()} place(s), wanted {check['min_press_spots']}")
         if "max_touches" in check and sim is not None and sim.touches > check["max_touches"]:
             failures.append(f"ran into something {sim.touches} times (at most {check['max_touches']})")
         if "summary_in_order" in check:

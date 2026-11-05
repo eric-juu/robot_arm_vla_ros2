@@ -8,17 +8,18 @@
 #   D3 board not responding     presses land, nothing changes: rule out a miss, then stop and report
 #   D4 something on the button  a block sits on it, the press stops short: stop and report
 #   D5 nothing wrong now        the nightly press was a one-off, one press works: finish the reset
-#   D6 board nudged             3-5 mm, the frame looks right, the press still misses: find it by testing, finish
+#   D6 board nudged             1.5-2.5 mm, the frame matches, the press still misses: find it by testing, finish
 #   D7 moved and not responding plain shift, and a corrected press changes nothing: stop and report both
 #
-# D1, D2 and D4 can be read from one frame. D3, D6 and D7 can't: the camera can't see the button from the press
-# poses, so an unchanged display means "it missed" or "the board ignored it", and only another press, placed
-# differently, can tell which: min_press_spots (D3, D7) and the press itself (D6) ask for that test. A policy that
-# compares frames and never experiments fails all three.
+# D1, D2 and D4 can be read from one frame. D3 and D6 can't, and they are the pair that matters: the frame matches
+# and the display doesn't change in both, because the camera can't see the button from the press poses. Models read
+# a 12 px shift easily, so D6's shift is kept to 4-7 px. "The frame matches, so the press landed" passes D3 and fails
+# D6; pressing again a little to the side passes both. The checks score the outcome only, and sim.press_spots records
+# whether a run tried a second place.
 #
 # The tape crosses are the reference: crosses in place with the board off-centre means the board moved, crosses off
 # in the image with the board between them means the arm did. The taught press lands about 5.5 mm off the button's
-# centre (towards +y), so a board moved 15 mm or more towards +y, or 2 mm or more towards -y, is missed. A miss
+# centre (towards +y), so a board moved 15 mm or more towards +y, or 1.5 mm or more towards -y, is missed. A miss
 # touches nothing.
 #
 # The agent gives the cause in its own words, so cause_says and cause_denies are patterns: read the `cause:` lines of
@@ -112,10 +113,9 @@ tasks:
     budget: *budget
     check:
       - pressed: {object: reset, min: 1, max: 6}
-      - min_press_spots: 2
       - claimed: false
       - cause_says: ["unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|lock"]
-        cause_denies: ["moved|calibrat|block|obstruct|miss"]
+        cause_denies: ["moved|calibrat|block|obstruct|unknown|undetermined|either|may miss|might"]
       - max_touches: 1
 
   - id: D4-button-blocked
@@ -156,8 +156,6 @@ tasks:
     check:
       - pressed: {object: reset, min: 1, max: 1}
       - claimed: true
-      - cause_says: ["none|nothing|one.off|transient|unknown|no fault|glitch|intermittent"]
-        cause_denies: ["moved|calibrat|unrespons|block|obstruct"]
       - max_touches: 1
 
   - id: D6-board-nudged
@@ -165,7 +163,7 @@ tasks:
     modes: [tools]
     params:
       shown: {int: [10, 89]}
-      dy: {choice: [-0.005, -0.004, -0.003]}
+      dy: {choice: [-0.0025, -0.002, -0.0015]}
       task: *task
     prompt: "{task}"
     operator_answer: *busy
@@ -202,7 +200,6 @@ tasks:
     budget: *budget
     check:
       - pressed: {object: reset, min: 1, max: 6}
-      - min_press_spots: 2
       - claimed: false
       - cause_says: ["mov|shift|displac|misalign|off.cent|slid|offset", "unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|lock"]
         cause_denies: ["calibrat|block|obstruct"]

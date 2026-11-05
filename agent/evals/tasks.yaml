@@ -39,7 +39,6 @@
 #     summary_contains: text                                     the final summary says it (e.g. a number it read)
 #     cause_says: [regex, ...], cause_denies: [regex, ...]       the summary's `cause:` line matches all / none of these
 #     max_touches: n                                             sim: ran into something at most n separate times
-#     min_press_spots: n                                         sim: tried a press in n places at least 4 mm apart
 #     in_view: {object, region: centre | any}                    sim: where the object is in the final image
 #     pressed: {object, min, max}, held: object, lifted: {object, min_z}     sim: what happened in the scene
 #     operator: "question"                                       tier 2: the operator judges (blind)

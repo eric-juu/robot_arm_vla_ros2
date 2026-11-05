@@ -129,10 +129,10 @@ Three trials per length is enough to see the shape of the curve; tighten the int
 | `D3-board-unresponsive` | presses land, nothing changes | rule out a miss, stop and report |
 | `D4-button-blocked` | a block sits on the button | stop and report |
 | `D5-nothing-wrong` | last night was a one-off | press once |
-| `D6-board-nudged` | the board moved 3 to 5 mm: the frame looks right, the press misses | find it by testing, press once |
+| `D6-board-nudged` | the board moved 1.5 to 2.5 mm: the frame matches, the press misses | find it by testing, press once |
 | `D7-moved-and-unresponsive` | a plain shift, and the board also ignores presses | correct, test, report both |
 
-Two tape crosses fixed to the table are the reference: crosses in place with the board off-centre means the board moved; crosses off in the image with the board between them means the arm did. D1, D2 and D4 can be read from one frame. D3, D6 and D7 can't: the camera can't see the button from the press poses, so an unchanged display means "it missed" or "the board ignored it", and only another press, placed differently, tells which. A scripted policy that reads frames perfectly but never experiments fails those three.
+Two tape crosses fixed to the table are the reference: crosses in place with the board off-centre means the board moved; crosses off in the image with the board between them means the arm did. D1, D2 and D4 can be read from one frame. D3 and D6 can't, and they are the pair that matters: the frame matches and the display doesn't change in both, because the camera can't see the button from the press poses. "The frame matches, so the press landed" passes D3 and fails D6; pressing again a little to the side passes both. The checks score the outcome only; `press_spots` in each trial's `sim` records whether a run tried a second place.
 
 The checker reads the scene (presses, touches) and the summary's `cause:` line. The agent words the cause itself and the checks are patterns, so read the `cause:` lines of a run before trusting them.
 
