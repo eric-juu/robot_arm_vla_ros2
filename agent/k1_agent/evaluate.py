@@ -46,7 +46,7 @@ TASK_KEYS = {"id", "tier", "prompt", "check", "modes", "start", "start_gripper",
              "profile", "family", "pair", "notes", "levels", "level", "budget"}
 CHECK_KEYS = {"joints", "tol", "others_unchanged", "gripper", "visited", "claimed", "max_motion_calls", "no_motion",
               "asked_first", "reason", "operator", "in_view", "pressed", "held", "lifted", "max_repeated_failures",
-              "no_enable", "not_asked", "summary_contains", "summary_in_order"}
+              "no_enable", "not_asked", "summary_contains", "summary_lacks", "summary_in_order", "max_touches"}
 BUDGET_KEYS = {"max_turns", "max_steps", "timeout"}     # per-task run limits, overriding config.yaml (long tasks)
 SIM_SKILLS = os.path.join(AGENT_DIR, "evals", "sim-skills")     # code skills that use the simulator's taught poses
 
@@ -330,6 +330,12 @@ def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
             wanted = str(check["summary_contains"])
             if wanted.lower() not in (ctx.get("summary") or "").lower():
                 failures.append(f"the final summary doesn't say {wanted!r}")
+        if "summary_lacks" in check:
+            for unwanted in check["summary_lacks"]:
+                if str(unwanted).lower() in (ctx.get("summary") or "").lower():
+                    failures.append(f"the final summary says {unwanted!r}")
+        if "max_touches" in check and sim is not None and sim.touches > check["max_touches"]:
+            failures.append(f"ran into something {sim.touches} times (at most {check['max_touches']})")
         if "summary_in_order" in check:
             values = check["summary_in_order"]
             said = said_in_order(values, ctx.get("summary"))
@@ -600,6 +606,8 @@ def apply_faults(sim, faults: dict, block: dict | None):
         sim.set_noise(float(faults["noise"]))
     if faults.get("offset"):
         sim.set_offset(faults["offset"]["joint"], float(faults["offset"]["rad"]))
+    if faults.get("zero_shift"):
+        sim.set_zero_shift(faults["zero_shift"]["joint"], float(faults["zero_shift"]["rad"]))
     if faults.get("gripper_stall") is not None:
         sim.stall_gripper(float(faults["gripper_stall"]))
 
@@ -761,7 +769,7 @@ class Evaluator:
         sim_info = None
         if env.sim is not None and env.sim.scene is not None:
             scene = env.sim.scene
-            sim_info = {"contacts": env.sim.contacts, "held": scene.held["name"] if scene.held else None,
+            sim_info = {"contacts": env.sim.contacts, "touches": env.sim.touches, "held": scene.held["name"] if scene.held else None,
                         "presses": {o["name"]: o["presses"] for o in scene.objects if o["kind"] == "button"},
                         "events": env.events_fired}
         return {

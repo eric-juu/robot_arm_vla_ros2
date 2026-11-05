@@ -13,9 +13,9 @@ camera is rendered from the arm's pose, fresh for every snapshot, and the scene 
 of the table and solid objects, buttons count presses, and a closed gripper holds a block. Without a scene the
 camera is a fixed grey "SIMULATED ARM" frame, which is enough for tests of planning, tool use and honesty.
 
-Faults for the evaluation's robustness tasks: measurement noise, a calibration offset on one joint, a gripper
-that stalls, joint states that go stale for a while, a camera that drops out, and a block that slips out of the
-gripper (the methods at the end of SimServer).
+Faults for the evaluation's robustness tasks: measurement noise, a calibration offset on one joint, a joint whose
+zero has shifted, a gripper that stalls, joint states that go stale for a while, a camera that drops out, and a
+block that slips out of the gripper (the methods at the end of SimServer).
 """
 import base64
 import os
@@ -128,6 +128,8 @@ class SimServer:
         self.scene_spec = scene
         self.scene = None
         self.contacts = 0                       # poses refused because the gripper would have hit something
+        self.touches = 0                        # separate times it ran into something (contacts counts every tick)
+        self._touching = False
         self._frame = (0, SIM_FRAME)
         self._frame_key = None
         self._clear_faults()
@@ -178,10 +180,14 @@ class SimServer:
                     self.gripper = gripper
                 if arm is not None:
                     target = [min(p, self.blocked[i]) if i in self.blocked else p for i, p in enumerate(arm)]
+                    target = [p + self._zero_shifts.get(i, 0.0) for i, p in enumerate(target)]
                     if self.scene is not None and self.scene.collides(target, self.gripper):
                         self.contacts += 1      # the gripper would hit the table or an object: it stops short
+                        self.touches += not self._touching
+                        self._touching = True
                     else:
                         self.arm = target
+                        self._touching = False
                 if self.scene is not None and (arm is not None or gripper is not None):
                     self.scene.step(self.arm, self.gripper)
                 measured = self._measured()
@@ -194,6 +200,8 @@ class SimServer:
         arm = list(self.arm)
         for i, offset in self._offsets.items():
             arm[i] += offset
+        for i, shift in self._zero_shifts.items():
+            arm[i] -= shift
         if self._noise:
             arm = [p + self._rng.gauss(0.0, self._noise) for p in arm]
         stop = self.scene.gripper_stop(self.gripper) if self.scene is not None else self.gripper
@@ -212,7 +220,8 @@ class SimServer:
             self.arm = list(joints if joints is not None else [0.0] * 6)
             self.gripper = gripper
             self.blocked = {}
-            self.contacts = 0
+            self.contacts = self.touches = 0
+            self._touching = False
             self.scene = Scene.from_spec(spec) if spec is not None else None
             self._frame_key = None
             self._clear_faults()
@@ -249,6 +258,7 @@ class SimServer:
 
     def _clear_faults(self):
         self._offsets: dict[int, float] = {}
+        self._zero_shifts: dict[int, float] = {}
         self._noise = 0.0
         self._rng = random.Random(0)
         self._gripper_stall: float | None = None
@@ -269,6 +279,14 @@ class SimServer:
         """A calibration error: `joint` always reads `rad` away from where it is, so moves end not_reached."""
         with self._lock:
             self._offsets[ARM_JOINTS.index(joint)] = float(rad)
+
+    def set_zero_shift(self, joint: str, rad: float):
+        """A joint that has lost its zero: it sits `rad` away from where it is commanded and reads as if it were
+        right, so every move ends ok while the arm is really somewhere else (a sensor `offset` is the opposite)."""
+        with self._lock:
+            index = ARM_JOINTS.index(joint)
+            self._zero_shifts[index] = float(rad)
+            self.arm[index] += float(rad)
 
     def stall_gripper(self, value: float):
         """The fingers never close past `value` (1 open .. 0 closed), as if something were stuck between them."""

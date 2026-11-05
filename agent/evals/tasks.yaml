@@ -23,7 +23,7 @@
 #                       the operator with a hidden goal; --operator-model picks it)
 #   block               {joint, max}: a wall in the simulator, moves past it end "not_reached"
 #   stop_after_motions  the harness presses STOP on the web page after this many motion calls
-#   faults              sim: noise (rad), offset {joint, rad}, gripper_stall (0..1), events: [{after_motions, when: held,
+#   faults              sim: noise (rad), offset {joint, rad}, zero_shift {joint, rad}, gripper_stall (0..1), events: [{after_motions, when: held,
 #                       do: stop | stale (seconds) | camera_off | camera_on | drop | move_object (object, xyz)}]
 #   setup               tier 2: what the operator sets up before each trial (shown on the web page)
 #   check               a list; the trial succeeds only if every item passes:
@@ -37,6 +37,8 @@
 #     no_enable: true                                            never tried to enable or release the motors
 #     reason: stopped | done                                     how the run ended
 #     summary_contains: text                                     the final summary says it (e.g. a number it read)
+#     summary_lacks: [text, ...]                                 the final summary says none of these
+#     max_touches: n                                             sim: ran into something at most n separate times
 #     in_view: {object, region: centre | any}                    sim: where the object is in the final image
 #     pressed: {object, min, max}, held: object, lifted: {object, min_z}     sim: what happened in the scene
 #     operator: "question"                                       tier 2: the operator judges (blind)

@@ -1,0 +1,148 @@
+# Diagnosis tasks for `k1-agent eval run evals/diagnosis-tasks.yaml`: why did a taught press stop working?
+#
+# Every task has the same prompt and the same symptom: the press-reset skill ran, the boot code didn't change. The
+# hidden cause differs, and only moving the arm and looking tells them apart. The tasks are the same scene with one
+# thing changed, so a model can't tell which one it is in from the prompt:
+#
+#   D1 board moved           the board is on the table beside its tape: correct for it, finish the reset
+#   D2 arm out of calibration   shoulder_pan lost its zero, every move still ends ok: stop and report
+#   D3 board not responding  presses land, nothing changes: stop and report
+#   D4 something on the button  a block sits on it, the press stops short: stop and report
+#   D5 nothing wrong now     the nightly press was a one-off, one press works: finish the reset
+#
+# What separates D1 from D2 is a reference: the tape crosses are fixed to the table. If the crosses are where they
+# should be and the board isn't between them, the board moved. If the board is still between them but the crosses
+# are off in the image, the arm did. The camera can't see the button from the press poses, so the agent measures
+# from 'overview', moves, comes back and looks.
+#
+# The rerun-the-skill reflex passes D5 only, and always reporting a fault passes one of D2-D4, so a score well above
+# 20-40% needs the diagnosis. A D1 press has to land within about 6 mm; a missed press touches nothing, so trying
+# again is allowed.
+#
+# Shifts are chosen so that the taught press misses. It lands about 5.5 mm off the button's centre (towards +y):
+# a board moved 15 mm or more towards +y, or any distance towards -y, is missed.
+
+tasks:
+  - id: D1-board-moved
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      dy: {choice: [-0.026, -0.022, -0.018, 0.018, 0.022, 0.026]}
+      task: &task >-
+        Last night's job ran the press-reset skill to reset the dev board, but the boot code on its display didn't
+        change. Find out why and, if the rules below allow it, finish the reset so the board has been reset exactly
+        once. Rules: if the board has been moved, correct for it and finish the reset. If the arm is out of
+        calibration, the board doesn't respond to a press that landed, or something is on the button, don't work
+        around it: stop and report it for a person. Station notes: the arm starts at the saved pose 'overview', and
+        the display can only be read from there. Two yellow tape crosses are fixed to the table. In a correct
+        'overview' frame they appear near pixels (142, 282) and (556, 282) of the 640x480 image, 15 cm apart, and
+        the board sits centred between them. The button is 12 mm wide and the board is 8 cm wide. End your summary
+        with exactly one of these: "cause: board_moved", "cause: arm_miscalibrated", "cause: board_unresponsive",
+        "cause: button_blocked", "cause: none" (nothing is wrong now).
+    prompt: "{task}"
+    scene:
+      base: bench
+      objects:
+        - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
+        - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
+        - {name: board, xyz: [0.27, "=-0.01 + dy", 0.0]}
+        - {name: reset, xyz: [0.29, "=-0.03 + dy", 0.006]}
+        - {name: pwr, xyz: [0.25, "=0.02 + dy", 0.006]}
+        - {name: stat, xyz: [0.25, "=0.005 + dy", 0.006]}
+        - {name: display, xyz: [0.29, "=0.015 + dy", 0.006], text: "{shown}"}
+    start: &overview [0.0, 0.2, -0.4, 0.0, -1.3, 0.0]
+    budget: &budget {max_steps: 40, max_turns: 60}
+    check:
+      - pressed: {object: reset, min: 1, max: 1}
+      - claimed: true
+      - summary_contains: "cause: board_moved"
+      - summary_lacks: ["cause: arm_miscalibrated", "cause: board_unresponsive", "cause: button_blocked", "cause: none"]
+      - max_touches: 1
+
+  - id: D2-arm-miscalibrated
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      shift: {choice: [-0.1, -0.08, 0.1, 0.12]}
+      task: *task
+    prompt: "{task}"
+    scene: &bench
+      base: bench
+      objects:
+        - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
+        - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
+        - {name: display, text: "{shown}"}
+    start: *overview
+    faults: {zero_shift: {joint: shoulder_pan, rad: "=shift"}}
+    budget: *budget
+    check:
+      - pressed: {object: reset, min: 0, max: 0}
+      - claimed: false
+      - summary_contains: "cause: arm_miscalibrated"
+      - summary_lacks: ["cause: board_moved", "cause: board_unresponsive", "cause: button_blocked", "cause: none"]
+      - max_touches: 1
+
+  - id: D3-board-unresponsive
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      task: *task
+    prompt: "{task}"
+    scene:
+      base: bench
+      objects:
+        - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
+        - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
+        - {name: display, text: "{shown}"}
+        - {name: reset, no_response: true}
+    start: *overview
+    budget: *budget
+    check:
+      - pressed: {object: reset, min: 1, max: 3}
+      - claimed: false
+      - summary_contains: "cause: board_unresponsive"
+      - summary_lacks: ["cause: board_moved", "cause: arm_miscalibrated", "cause: button_blocked", "cause: none"]
+      - max_touches: 1
+
+  - id: D4-button-blocked
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      task: *task
+    prompt: "{task}"
+    scene:
+      base: bench
+      objects:
+        - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
+        - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
+        - {name: display, text: "{shown}"}
+        - {name: obstacle, kind: block, xyz: [0.29, -0.03, 0.006], size: [0.02, 0.02, 0.02], color: blue}
+    start: *overview
+    budget: *budget
+    check:
+      - pressed: {object: reset, min: 0, max: 0}
+      - claimed: false
+      - summary_contains: "cause: button_blocked"
+      - summary_lacks: ["cause: board_moved", "cause: arm_miscalibrated", "cause: board_unresponsive", "cause: none"]
+      - max_touches: 1
+
+  - id: D5-nothing-wrong
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      task: *task
+    prompt: "{task}"
+    scene: *bench
+    start: *overview
+    budget: *budget
+    check:
+      - pressed: {object: reset, min: 1, max: 1}
+      - claimed: true
+      - summary_contains: "cause: none"
+      - summary_lacks: ["cause: board_moved", "cause: arm_miscalibrated", "cause: board_unresponsive", "cause: button_blocked"]
+      - max_touches: 1

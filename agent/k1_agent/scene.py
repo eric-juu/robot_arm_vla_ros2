@@ -21,7 +21,7 @@ Contact: a pose that would push the fingertips or the gripper into the table or 
 closing the gripper around a block holds it until it opens again.
 
 A reset press reboots the board: a display counts boots, or with `sequence: [...]` shows the next entry (a boot
-code) after each one. An object with `follow_camera: d` (metres) stays d in front of the wrist camera, like a
+code) after each one. A button with `no_response: true` still counts presses, but the board ignores them (it hung). An object with `follow_camera: d` (metres) stays d in front of the wrist camera, like a
 hand reaching in front of the arm wherever it looks.
 
 The kinematic constants below are copied from ros2/k1_description/urdf/k1_standalone.urdf (a test checks they
@@ -253,6 +253,8 @@ class Scene:
     def on_press(self, button: dict):
         """A dev board's reset button reboots it: the status LED blinks and the display counts boots (or shows the
         next boot code of its `sequence`)."""
+        if button.get("no_response"):
+            return
         for obj in self.objects:
             if obj["kind"] == "display" and obj.get("sequence"):
                 obj["boots"] = obj.get("boots", 0) + 1

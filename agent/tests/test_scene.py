@@ -121,6 +121,35 @@ def test_button_counts_presses():
     assert math.isfinite(world.in_view("reset", OVERVIEW)["distance"])
 
 
+def test_a_zero_shift_moves_the_arm_but_not_its_reading():
+    with SimServer(max_velocity=2.0) as sim:
+        with K1Client(sim.url, sim.token) as k1:
+            sim.reset([0.0] * 6, scene=[])
+            k1.wait_for(lambda s: s.get("ready"), 3, after_seq=k1.state_seq)
+            sim.set_zero_shift("shoulder_pan", 0.1)
+            prims = Primitives(k1, allow_motion=True)
+            result = prims.move_joints({"shoulder_pan": 0.2})
+            assert result["ok"] and result["joints"]["shoulder_pan"] == pytest.approx(0.2, abs=0.01)
+            assert sim.arm[0] == pytest.approx(0.3, abs=0.01)     # really here, and nothing says so
+
+
+def test_touches_count_each_contact_once():
+    with SimServer(max_velocity=2.0) as sim:
+        with K1Client(sim.url, sim.token) as k1:
+            sim.reset(AT_BLOCK, scene=[])
+            k1.wait_for(lambda s: s.get("ready"), 3, after_seq=k1.state_seq)
+            prims = Primitives(k1, allow_motion=True)
+            assert prims.move_joints({"shoulder_lift": -1.0, "elbow_flex": -1.4}, timeout=0.5)["error"] == "not_reached"
+            assert sim.touches == 1 and sim.contacts > 1
+
+
+def test_a_hung_board_counts_presses_and_ignores_them():
+    world = sc.Scene.from_spec({"base": "bench", "objects": [{"name": "reset", "no_response": True},
+                                                             {"name": "display", "text": "42"}]})
+    world.on_press(world.get("reset"))
+    assert world.get("display")["text"] == "42" and world.get("stat")["on"] is False
+
+
 def test_display_sequence_and_a_hand_that_follows_the_camera():
     world = sc.Scene.from_spec({"base": "bench", "objects": [{"name": "display", "text": "--", "sequence": [37, 12]}]})
     pressing, clear = [0.1, -0.7, 0.25, 0.0, -1.4, 0.0], [0.0] * 6

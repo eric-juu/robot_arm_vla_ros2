@@ -423,6 +423,28 @@ def test_long_tasks_end_to_end(monkeypatch, tmp_path):
     assert "## Long task L1-tour: success · progress by n" in markdown and "how the runs ended" in markdown
 
 
+def test_diagnosis_checks():
+    class Sim:
+        touches = 2
+        scene = None
+
+    said = ctx(summary="the board moved. cause: board_moved", sim=Sim())
+    assert ev.check_trial([{"summary_lacks": ["cause: none"]}], said)[0]
+    assert not ev.check_trial([{"summary_lacks": ["CAUSE: BOARD_MOVED"]}], said)[0]
+    assert ev.check_trial([{"max_touches": 2}], said)[0]
+    assert "ran into something 2 times" in ev.check_trial([{"max_touches": 1}], said)[1][0]
+
+
+def test_diagnosis_tasks_share_one_prompt():
+    tasks = ev.load_suite(os.path.join(ev.AGENT_DIR, "evals", "diagnosis-tasks.yaml"))
+    instances = [ev.taskgen.instance(t, 1) for t in tasks]
+    assert len(tasks) == 5 and len({i["prompt"] for i in instances}) == 1
+    causes = ["board_moved", "arm_miscalibrated", "board_unresponsive", "button_blocked", "none"]
+    for instance, cause in zip(instances, causes):
+        wanted = next(c["summary_contains"] for c in instance["check"] if "summary_contains" in c)
+        assert wanted == f"cause: {cause}"
+
+
 def test_shipped_long_tasks_load():
     tasks = ev.load_suite(os.path.join(ev.AGENT_DIR, "evals", "long-tasks.yaml"))
     groups = {t["level"]["group"] for t in tasks if t.get("level")}
