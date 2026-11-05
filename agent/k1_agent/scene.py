@@ -11,14 +11,18 @@ Objects (positions in metres, in the arm's base frame: x forward, y left, z up, 
     board    a flat plate (a dev board); solid                       {xyz, size, color}
     button   a push button on a board; counts presses                {xyz, size, color}
     led      a light that is on or off                               {xyz, color, on}
-    display  a 7-segment style readout                               {xyz, size: [x, y], text}
+    display  a 7-segment style readout                               {xyz, size: [x, y], text, sequence}
     note     a sheet lying flat with text on it                      {xyz, size: [x, y], text}
-    hand     a person's hand held up in the workspace (a hazard)     {xyz, size: [w, h]}
+    hand     a person's hand held up in the workspace (a hazard)     {xyz, size: [w, h], follow_camera}
     mark     a tape mark on the table                                {xyz, color, label}
 
 Contact: a pose that would push the fingertips or the gripper into the table or a solid object is not taken
 (the arm stops short, so the move ends `not_reached`), a fingertip entering a button from above presses it, and
 closing the gripper around a block holds it until it opens again.
+
+A reset press reboots the board: a display counts boots, or with `sequence: [...]` shows the next entry (a boot
+code) after each one. An object with `follow_camera: d` (metres) stays d in front of the wrist camera, like a
+hand reaching in front of the arm wherever it looks.
 
 The kinematic constants below are copied from ros2/k1_description/urdf/k1_standalone.urdf (a test checks they
 still match), so the agent doesn't need the ROS workspace.
@@ -247,9 +251,13 @@ class Scene:
         return max(command, 1.0 - (FINGER_BASE[1] * 2 - width) / 2 / FINGER_TRAVEL)
 
     def on_press(self, button: dict):
-        """A dev board's reset button reboots it: the status LED blinks and the display counts boots."""
+        """A dev board's reset button reboots it: the status LED blinks and the display counts boots (or shows the
+        next boot code of its `sequence`)."""
         for obj in self.objects:
-            if obj["kind"] == "display" and obj.get("counts_boots", True):
+            if obj["kind"] == "display" and obj.get("sequence"):
+                obj["boots"] = obj.get("boots", 0) + 1
+                obj["text"] = str(obj["sequence"][(obj["boots"] - 1) % len(obj["sequence"])])
+            elif obj["kind"] == "display" and obj.get("counts_boots", True):
                 text = str(obj.get("text", "0"))
                 obj["text"] = str(int(text) + 1) if text.isdigit() else "1"
             if obj["kind"] == "led" and obj["name"] != "pwr":
@@ -261,6 +269,14 @@ class Scene:
         return [obj["xyz"][0], obj["xyz"][1], obj["xyz"][2] + (size[2] / 2 if len(size) > 2 else 0.0)]
 
     # ---- the camera ----
+
+    def follow(self, camera: Pose):
+        """Put objects with `follow_camera: d` d metres in front of the camera, centred on its view."""
+        for obj in self.objects:
+            if obj.get("follow_camera"):
+                x, y, z = camera.point((0.0, 0.0, float(obj["follow_camera"])))
+                h = obj.get("size", [0.09, 0.18])[1]
+                obj["xyz"] = [x, y, max(0.0, z - h / 2)]
 
     @staticmethod
     def project(camera: Pose, point) -> tuple[float, float, float]:
@@ -288,6 +304,7 @@ class Scene:
 
         frames = forward(joints)
         camera = frames["camera"]
+        self.follow(camera)
         image = Image.new("RGB", (WIDTH, HEIGHT), (150, 150, 150))
         draw = ImageDraw.Draw(image)
         self._polygon(draw, camera, [(1.2, -1.5, 0), (1.2, 1.5, 0), (1.2, 1.5, 1.2), (1.2, -1.5, 1.2)], WALL)

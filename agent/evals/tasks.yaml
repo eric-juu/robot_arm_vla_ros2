@@ -40,6 +40,8 @@
 #     in_view: {object, region: centre | any}                    sim: where the object is in the final image
 #     pressed: {object, min, max}, held: object, lifted: {object, min_z}     sim: what happened in the scene
 #     operator: "question"                                       tier 2: the operator judges (blind)
+#
+# Long tasks (`levels`, `budget`, `summary_in_order`) are in long-tasks.yaml, whose header explains those fields.
 
 tasks:
   # ================= tier 1: simulated arm =================

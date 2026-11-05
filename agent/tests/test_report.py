@@ -65,3 +65,63 @@ def test_templates():
     assert one == again and one["prompt"] == f"go {one['params_used']['x']}"
     assert {taskgen.instance(task, t, seed=7)["prompt"] for t in range(1, 20)} != {one["prompt"]}
     assert taskgen.instance({"id": "S", "tier": 1, "prompt": "p", "check": []}, 3)["params_used"] == {}
+
+
+def test_lists_waypoints_and_levels():
+    rng = random.Random(4)
+    names = taskgen.sample({"n": 12, "codes": {"int": [10, 12], "count": "=n"},
+                            "tour": {"waypoints": "=n", "joints": ["shoulder_pan", "wrist_flex"], "values": [-0.2, 0.0, 0.2]},
+                            "text": "=numbered(tour)", "size": "=len(codes)"}, rng)
+    assert len(names["codes"]) == 12 and names["size"] == 12
+    assert all(a != b for a, b in zip(names["codes"], names["codes"][1:]))       # never the same twice in a row
+    tour = names["tour"]
+    assert all(v != 0.0 for v in tour[0].values())                                # the first pose is a real move
+    assert all(a[j] != b[j] for a, b in zip(tour, tour[1:]) for j in a)           # every joint changes every step
+    first = tour[0]
+    assert names["text"].startswith(f"1) shoulder_pan {first['shoulder_pan']}, wrist_flex {first['wrist_flex']}; 2) ")
+    with pytest.raises(taskgen.TaskError):
+        taskgen.sample({"codes": {"int": [1, 9], "count": 0}}, rng)
+
+    task = {"id": "L", "tier": 1, "levels": {"n": [2, 4]}, "params": {"twice": "=2 * n"}, "prompt": "{twice}",
+            "check": [{"claimed": False}]}
+    expanded = taskgen.expand_levels(task)
+    assert [t["id"] for t in expanded] == ["L-n2", "L-n4"] and "levels" not in expanded[0]
+    assert expanded[1]["level"] == {"name": "n", "value": 4, "group": "L"}
+    assert taskgen.instance(expanded[1], 1)["prompt"] == "8"                      # the level is a param
+    with pytest.raises(taskgen.TaskError):
+        taskgen.expand_levels(dict(task, params={"n": 5}))                         # both a level and a param
+    with pytest.raises(taskgen.TaskError):
+        taskgen.expand_levels(dict(task, levels={"n": [2], "m": [3]}))
+
+
+def test_horizon_estimate():
+    # 100%, 80%, 40%, 0%: crosses 50% between 8 and 16, at 2 ** (3 + 0.3 / 0.4) on a log scale
+    levels = [(4, 5, 5), (8, 4, 5), (16, 2, 5), (32, 0, 5)]
+    assert report.horizon_estimate(levels) == pytest.approx(2 ** 3.75)
+    low, high = report.horizon_interval(levels)
+    assert low <= 2 ** 3.75 <= high and 4 <= low and high <= 32
+    assert report.horizon_estimate([(4, 5, 5), (8, 3, 5)]) == math.inf         # never below 50%
+    assert report.horizon_estimate([(4, 1, 5), (8, 0, 5)]) == 0.0              # below 50% from the start
+    # a longer task that did better (noise) is pooled with the shorter one rather than read as a crossing
+    assert report.horizon_estimate([(4, 2, 5), (8, 5, 5), (16, 0, 5)]) == pytest.approx(2 ** (3 + 0.2 / 0.7))
+
+
+def test_horizon_report():
+    def row(model, n, success, **extra):
+        return {"kind": "trial", "model": model, "mode": "tools", "success": success, "claimed": success,
+                "level": {"name": "n", "value": n, "group": "H1"}, "progress": 1.0 if success else 0.5,
+                "cost_usd": 0.1, "llm_calls": n + 3, "reason": "done", **extra}
+
+    rows = ([row("big", n, True) for n in (4, 8, 16) for _ in range(3)] +
+            [row("small", 4, True)] * 3 + [row("small", 8, False, reason="max_turns")] * 2 + [row("small", 8, True)] +
+            [row("small", 16, False, claimed=True)] * 3)
+    assert report.ending(rows[-1]) == "false success" and report.ending(rows[-5]) == "out of budget"
+    groups = report.summarize_horizons(rows)
+    small = next(m for m in groups[0]["models"] if m["model"] == "small")
+    assert small["levels"][8] == {"successes": 1, "n": 3, "progress": pytest.approx(2 / 3),
+                                  "cost_per_success": pytest.approx(0.3), "turns": 11}
+    text = report.horizon_markdown(rows)
+    assert "## Long task H1: success · progress by n" in text and "| n=4 | n=8 | n=16 |" in text
+    assert "> 16 [> 16, > 16]" in text                                          # big never fell below 50%
+    assert "## Long tasks: how the runs ended" in text and "| small | tools | 44% | 33% | 0% | 22% |" in text
+    assert report.horizon_markdown([{"kind": "trial", "model": "m", "success": True}]) == ""

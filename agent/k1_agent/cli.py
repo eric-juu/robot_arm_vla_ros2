@@ -351,15 +351,14 @@ def cmd_eval(config, args):
                         choices=args.choices.split(",") if args.choices else None, category=args.category,
                         limit=args.limit, auto=not args.no_auto)
     elif args.eval_command == "report":
-        from k1_agent import incidents, probes
+        from k1_agent.report import report_sections
 
         rows = ev.load_rows(args.results)
         markdown, trials, perception = ev.report_all(rows)
         print(markdown)
         if args.html:
-            extra = [s for s in (probes.report(rows), incidents.report(rows)) if s]
             with open(args.html, "w", encoding="utf-8") as f:
-                f.write(ev.report_html(trials, perception, extra=extra))
+                f.write(ev.report_html(trials, perception, extra=report_sections(rows)))
             print(f"\nwrote {args.html}")
     return 0
 

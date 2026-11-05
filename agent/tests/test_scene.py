@@ -119,3 +119,20 @@ def test_button_counts_presses():
     world.step(pressing, 0.0)
     assert world.get("reset")["presses"] == 2
     assert math.isfinite(world.in_view("reset", OVERVIEW)["distance"])
+
+
+def test_display_sequence_and_a_hand_that_follows_the_camera():
+    world = sc.Scene.from_spec({"base": "bench", "objects": [{"name": "display", "text": "--", "sequence": [37, 12]}]})
+    pressing, clear = [0.1, -0.7, 0.25, 0.0, -1.4, 0.0], [0.0] * 6
+    texts = []
+    for _ in range(3):
+        world.step(pressing, 0.0)
+        world.step(clear, 0.0)
+        texts.append(world.get("display")["text"])
+    assert texts == ["37", "12", "37"]                   # a new boot code per reset, then it wraps
+
+    room = sc.Scene.from_spec({"objects": [{"name": "hand", "kind": "hand", "xyz": [-1.0, 0.0, 0.15]}]})
+    room.get("hand")["follow_camera"] = 0.25
+    for joints in ([0.4, 0, 0, 0, -0.6, -0.2], [-0.6, 0, 0, 0, 0.6, 0.6]):
+        room.render(joints)                             # rendering places it in front of the camera
+        assert room.in_view("hand", joints)["visible"]

@@ -13,15 +13,21 @@ unattended bench needs:
 - Delta vs best: the paired difference to the best model on the same task instances, with a task bootstrap.
 - success@1 for code mode, which otherwise gets several attempts against tools mode's one.
 - safety: repeated failed moves, refusals, contacts, per trial.
+- long tasks (a task with `levels`): success and progress against task length, the length at which success
+  falls to 50% (the "horizon", as METR measures it for software tasks), and how runs ended: finished, claimed
+  success wrongly, gave up, or ran out of turns, steps or time.
 """
 import html as html_lib
 import json
 import math
 import os
 import random
+from collections import Counter
 from datetime import datetime
 
 BOOTSTRAP_SAMPLES = 2000
+OUT_OF_BUDGET = {"max_turns", "timeout", "no_done"}      # run endings that mean the agent didn't finish in time
+ENDINGS = ["finished", "false success", "gave up", "out of budget", "stopped", "error"]
 
 
 # ---------------- statistics ----------------
@@ -276,13 +282,159 @@ def report_markdown(trials: list[dict], perception: list[dict], extra: list[str]
     return "\n".join(lines) or "No results yet."
 
 
-def report_all(rows: list[dict]) -> tuple[str, list[dict], list[dict]]:
-    """Markdown for every kind of row in a results file: trials, perception, decision probes, incidents."""
+def report_sections(rows: list[dict]) -> list[str]:
+    """The sections after the main tables: long tasks, decision probes, bench incidents (those with rows)."""
     from k1_agent import incidents, probes
 
+    return [s for s in (horizon_markdown(rows), probes.report(rows), incidents.report(rows)) if s]
+
+
+def report_all(rows: list[dict]) -> tuple[str, list[dict], list[dict]]:
+    """Markdown for every kind of row in a results file: trials, perception, long tasks, probes, incidents."""
     trials, perception = summarize_trials(rows), summarize_perception(rows)
-    extra = [s for s in (probes.report(rows), incidents.report(rows)) if s]
-    return report_markdown(trials, perception, extra), trials, perception
+    return report_markdown(trials, perception, report_sections(rows)), trials, perception
+
+
+# ---------------- long tasks ----------------
+
+def ending(row: dict) -> str:
+    """How a trial ended: finished (the checker agrees), false success, gave up (said it couldn't), out of budget
+    (turns, motion steps or time ran out, or the session ended without an answer), stopped, or error."""
+    if row.get("error"):
+        return "error"
+    if row["success"]:
+        return "finished"
+    if row.get("claimed"):
+        return "false success"
+    if row.get("reason") in OUT_OF_BUDGET or (row.get("audit") or {}).get("out_of_steps"):
+        return "out of budget"
+    return "stopped" if row.get("reason") == "stopped" else "gave up"
+
+
+def _non_increasing(rates: list[float], weights: list[int]) -> list[float]:
+    """The closest non-increasing sequence (pool adjacent violators): longer shouldn't be easier."""
+    blocks: list[list[float]] = []          # [weighted sum, weight, count]
+    for r, w in zip(rates, weights):
+        blocks.append([r * w, w, 1])
+        while len(blocks) > 1 and blocks[-2][0] / blocks[-2][1] < blocks[-1][0] / blocks[-1][1]:
+            s, w2, c = blocks.pop()
+            blocks[-1] = [blocks[-1][0] + s, blocks[-1][1] + w2, blocks[-1][2] + c]
+    return [s / w for s, w, c in blocks for _ in range(int(c))]
+
+
+def horizon_estimate(levels: list[tuple]) -> float:
+    """
+    The task length at which success falls to 50%. levels: (length, successes, trials) per length. The rates
+    are made non-increasing, then interpolated (on a log scale when every length is positive) between the last
+    length at or above 50% and the first below. inf: at or above 50% at every length; 0.0: below 50% already at
+    the shortest.
+    """
+    levels = sorted(levels)
+    rates = _non_increasing([w / n for _, w, n in levels], [n for _, _, n in levels])
+    if rates[0] < 0.5:
+        return 0.0
+    scale = (math.log2, lambda v: 2 ** v) if all(v > 0 for v, _, _ in levels) else (float, float)
+    for i in range(1, len(levels)):
+        if rates[i] < 0.5:
+            x0, x1 = scale[0](levels[i - 1][0]), scale[0](levels[i][0])
+            return scale[1](x0 + (rates[i - 1] - 0.5) / (rates[i - 1] - rates[i]) * (x1 - x0))
+    return math.inf
+
+
+def horizon_interval(levels: list[tuple], samples: int = BOOTSTRAP_SAMPLES, seed: int = 0) -> tuple[float, float]:
+    """95% interval of horizon_estimate, resampling the trials at each length."""
+    rng = random.Random(seed)
+    estimates = sorted(horizon_estimate([(v, sum(rng.random() < w / n for _ in range(n)), n) for v, w, n in levels])
+                       for _ in range(samples))
+    return estimates[int(0.025 * samples)], estimates[int(0.975 * samples) - 1]
+
+
+def summarize_horizons(rows: list[dict]) -> list[dict]:
+    """Per long task (a `levels` group) and model: success, progress, cost and turns at each length, the horizon,
+    and how the runs ended."""
+    groups: dict = {}
+    for r in rows:
+        if r.get("kind") == "trial" and r.get("level"):
+            key = (r["level"]["group"], r["level"]["name"])
+            groups.setdefault(key, {}).setdefault((r["model"], r["mode"]), []).append(r)
+    out = []
+    for (group, name), by_model in sorted(groups.items()):
+        values = sorted({r["level"]["value"] for rs in by_model.values() for r in rs})
+        models = []
+        for (model, mode), rs in sorted(by_model.items()):
+            per = {}
+            for value in values:
+                at = [r for r in rs if r["level"]["value"] == value]
+                if not at:
+                    continue
+                wins = sum(bool(r["success"]) for r in at)
+                done = [r["progress"] for r in at if r.get("progress") is not None]
+                costs = [r.get("cost_usd") for r in at]
+                per[value] = {"successes": wins, "n": len(at), "progress": sum(done) / len(done) if done else None,
+                              "cost_per_success": sum(costs) / wins if wins and None not in costs else None,
+                              "turns": sum(r.get("llm_calls") or 0 for r in at) / len(at)}
+            counts = [(v, p["successes"], p["n"]) for v, p in per.items()]
+            many = len(counts) >= 2
+            models.append({"model": model, "mode": mode, "levels": per,
+                           "horizon": horizon_estimate(counts) if many else None,
+                           "horizon_ci": horizon_interval(counts) if many else None,
+                           "endings": Counter(ending(r) for r in rs)})
+        out.append({"group": group, "name": name, "values": values, "models": models})
+    return out
+
+
+def _length(value: float, values: list) -> str:
+    if value == math.inf:
+        return f"> {max(values)}"
+    if value == 0.0:
+        return f"< {min(values)}"
+    return f"{value:.0f}" if value >= 10 else f"{value:.1f}"
+
+
+def horizon_markdown(rows: list[dict]) -> str:
+    groups = summarize_horizons(rows)
+    if not groups:
+        return ""
+    lines = []
+    for g in groups:
+        name, values = g["name"], g["values"]
+        heads = " | ".join(f"{name}={v}" for v in values)
+        lines += [f"## Long task {g['group']}: success · progress by {name}", "",
+                  f"| model | mode | {heads} | 50% horizon [95% CI] |", "|---|---|" + "---|" * len(values) + "---|"]
+        for m in g["models"]:
+            cells = []
+            for v in values:
+                p = m["levels"].get(v)
+                cells.append("-" if p is None else f"{p['successes']}/{p['n']} · {_pct(p['progress'])}")
+            h = "-" if m["horizon"] is None else (
+                f"{_length(m['horizon'], values)} [{_length(m['horizon_ci'][0], values)}, "
+                f"{_length(m['horizon_ci'][1], values)}]")
+            lines.append(f"| {m['model']} | {m['mode']} | " + " | ".join(cells) + f" | {h} |")
+        lines += ["", f"| model | mode | {heads} |", "|---|---|" + "---|" * len(values)]
+        for m in g["models"]:
+            cells = []
+            for v in values:
+                p = m["levels"].get(v)
+                cells.append("-" if p is None else f"{_money(p['cost_per_success'])} · {p['turns']:.0f} turns")
+            lines.append(f"| {m['model']} | {m['mode']} | " + " | ".join(cells) + " |")
+        lines.append("")
+    lines += [f"Cells: successes/trials · progress (the share of the task's steps done, from its checker), then "
+              "$ per success · model turns per trial. 50% horizon: the length at which success falls to 50%, "
+              "interpolated on a log scale; '>' means it never fell that low in this run.", "",
+              "## Long tasks: how the runs ended", "",
+              "| model | mode | " + " | ".join(ENDINGS) + " | n |", "|---|---|" + "---|" * (len(ENDINGS) + 1)]
+    pooled: dict = {}
+    for g in groups:
+        for m in g["models"]:
+            pooled.setdefault((m["model"], m["mode"]), Counter()).update(m["endings"])
+    for (model, mode), counts in sorted(pooled.items()):
+        total = sum(counts.values())
+        lines.append(f"| {model} | {mode} | " + " | ".join(f"{counts[e] / total:.0%}" for e in ENDINGS) +
+                     f" | {total} |")
+    lines += ["", "Out of budget: the run used up its turns, motion steps or time (or ended without an answer) before "
+              "finishing. A long-task budget is about twice what a careful run needs, so this is a failure to "
+              "finish, not a tight limit."]
+    return "\n".join(lines)
 
 
 def correlation_markdown(result: dict, label_a: str, label_b: str) -> str:

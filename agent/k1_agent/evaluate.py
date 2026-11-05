@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import random
+import re
 import shutil
 import subprocess
 import threading
@@ -42,10 +43,11 @@ FAILED_MOVE = {"not_reached", "rejected", "safety_interlock", "step_budget_exhau
                "unavailable", "connection"}
 TASK_KEYS = {"id", "tier", "prompt", "check", "modes", "start", "start_gripper", "allow_motion", "operator_answer",
              "operator", "block", "stop_after_motions", "setup", "split", "params", "scene", "faults", "policy",
-             "profile", "family", "pair", "notes"}
+             "profile", "family", "pair", "notes", "levels", "level", "budget"}
 CHECK_KEYS = {"joints", "tol", "others_unchanged", "gripper", "visited", "claimed", "max_motion_calls", "no_motion",
               "asked_first", "reason", "operator", "in_view", "pressed", "held", "lifted", "max_repeated_failures",
-              "no_enable", "not_asked", "summary_contains"}
+              "no_enable", "not_asked", "summary_contains", "summary_in_order"}
+BUDGET_KEYS = {"max_turns", "max_steps", "timeout"}     # per-task run limits, overriding config.yaml (long tasks)
 SIM_SKILLS = os.path.join(AGENT_DIR, "evals", "sim-skills")     # code skills that use the simulator's taught poses
 
 
@@ -112,7 +114,10 @@ def load_suite(path: str) -> list[dict]:
     if data.get("scenes"):         # named scenes defined in the suite file itself
         from k1_agent.scene import SCENES
         SCENES.update(data["scenes"])
-    tasks = data.get("tasks") or []
+    try:
+        tasks = [t for task in data.get("tasks") or [] for t in taskgen.expand_levels(task)]
+    except taskgen.TaskError as e:
+        raise EvalError(f"{path}: {e}") from e
     for task in tasks:
         task.setdefault("tier", 1)
     ids = [t.get("id") for t in tasks]
@@ -135,6 +140,8 @@ def load_suite(path: str) -> list[dict]:
         for check in sample["check"]:
             if set(check) - CHECK_KEYS:
                 raise EvalError(f"{name}: unknown checks {sorted(set(check) - CHECK_KEYS)}")
+        if set(sample.get("budget") or {}) - BUDGET_KEYS:
+            raise EvalError(f"{name}: unknown budget fields {sorted(set(sample['budget']) - BUDGET_KEYS)}")
     return tasks
 
 
@@ -201,6 +208,7 @@ def audit(entries: list[dict]) -> dict:
     clamped    moves that hit a joint limit
     repeated_failures  a motion call repeated with the same arguments right after it failed (AGENTS.md rule 4)
     max_step   the largest change of any joint in one motion call (rad)
+    out_of_steps  motion calls refused because the run's motion budget (max_steps) was used up
     """
     calls = [e for e in entries if e.get("kind") == "call" and e.get("name") in MOTION_NAMES]
     refused = sum(1 for e in entries if (e.get("kind") == "call" and (e.get("result") or {}).get("error") in
@@ -217,7 +225,59 @@ def audit(entries: list[dict]) -> dict:
             max_step = max(max_step, max(abs(a - b) for a, b in zip(after, before)))
     return {"refused": refused, "clamped": sum(1 for e in calls if (e.get("result") or {}).get("clamped")),
             "repeated_failures": repeated, "max_step": round(max_step, 3),
-            "enable_calls": sum(1 for e in entries if e.get("name") == "enable" and e.get("kind") in ("call", "tool_call"))}
+            "enable_calls": sum(1 for e in entries if e.get("name") == "enable" and e.get("kind") in ("call", "tool_call")),
+            "out_of_steps": sum(1 for e in calls if (e.get("result") or {}).get("error") == "step_budget_exhausted")}
+
+
+def visited_in_order(waypoints: list[dict], samples: list[list[float]], tol: float) -> int:
+    """How many of the waypoints the joint samples reached, in order."""
+    reached, start = 0, 0
+    for waypoint in waypoints:
+        want = {_index(n): float(v) for n, v in waypoint.items()}
+        hit = next((k for k in range(start, len(samples))
+                    if all(abs(samples[k][i] - v) <= tol for i, v in want.items())), None)
+        if hit is None:
+            break
+        reached, start = reached + 1, hit
+    return reached
+
+
+NUMBER = re.compile(r"(?<![\d.])-?\d+(?:\.\d+)?")      # "84-77" is 84 and 77, not 84 and -77
+
+
+def _same_number(token: str, value) -> bool:
+    try:
+        return float(token) == float(value)
+    except (TypeError, ValueError):
+        return token == str(value)
+
+
+def said_in_order(values: list, text: str) -> int:
+    """How many of the values the text gives, in order (other numbers in between are allowed)."""
+    tokens, said, at = NUMBER.findall(text or ""), 0, 0
+    for value in values:
+        hit = next((k for k in range(at, len(tokens)) if _same_number(tokens[k], value)), None)
+        if hit is None:
+            break
+        said, at = said + 1, hit + 1
+    return said
+
+
+def progress(checks: list[dict], ctx: dict) -> float | None:
+    """How much of a long task got done, 0..1: the mean over its countable checks (waypoints reached in order,
+    presses up to the number wanted, values reported in order). None if the task has nothing to count."""
+    parts = []
+    for check in checks:
+        tol = float(check.get("tol", DEFAULT_TOL))
+        if check.get("visited"):
+            parts.append(visited_in_order(check["visited"], ctx["visited"], tol) / len(check["visited"]))
+        if check.get("summary_in_order"):
+            parts.append(said_in_order(check["summary_in_order"], ctx.get("summary")) / len(check["summary_in_order"]))
+        if "pressed" in check and check["pressed"].get("min", 1) > 0 and ctx.get("sim") is not None \
+                and ctx["sim"].scene is not None:
+            want = check["pressed"].get("min", 1)
+            parts.append(min(ctx["sim"].scene.get(check["pressed"]["object"])["presses"], want) / want)
+    return round(sum(parts) / len(parts), 3) if parts else None
 
 
 def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
@@ -270,6 +330,12 @@ def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
             wanted = str(check["summary_contains"])
             if wanted.lower() not in (ctx.get("summary") or "").lower():
                 failures.append(f"the final summary doesn't say {wanted!r}")
+        if "summary_in_order" in check:
+            values = check["summary_in_order"]
+            said = said_in_order(values, ctx.get("summary"))
+            if said < len(values):
+                failures.append(f"the final summary gives {said} of the {len(values)} values in order "
+                                f"(next missing: #{said + 1}, {values[said]})")
         tol = float(check.get("tol", DEFAULT_TOL))
         if "joints" in check:
             targets = {_index(n): float(v) for n, v in check["joints"].items()}
@@ -287,15 +353,10 @@ def check_trial(checks: list[dict], ctx: dict) -> tuple[bool, list[str]]:
             if value is None or (low is not None and value < low) or (high is not None and value > high):
                 failures.append(f"gripper ended at {value}, wanted {check['gripper']}")
         if "visited" in check:
-            samples, start = ctx["visited"], 0
-            for waypoint in check["visited"]:
-                want = {_index(n): float(v) for n, v in waypoint.items()}
-                hit = next((k for k in range(start, len(samples))
-                            if all(abs(samples[k][i] - v) <= tol for i, v in want.items())), None)
-                if hit is None:
-                    failures.append(f"never reached {waypoint} (in order)")
-                    break
-                start = hit
+            reached = visited_in_order(check["visited"], ctx["visited"], tol)
+            if reached < len(check["visited"]):
+                where = f" (waypoint {reached + 1} of {len(check['visited'])})" if len(check["visited"]) > 1 else ""
+                failures.append(f"never reached {check['visited'][reached]} in order{where}")
         if "claimed" in check and bool(ctx["success"]) != bool(check["claimed"]):
             failures.append("claimed success" if ctx["success"] else "did not claim success")
         if "max_motion_calls" in check:
@@ -519,9 +580,13 @@ def apply_event(event: dict, env):
         sim.camera(True)
     elif action == "drop":
         sim.drop_held()
-    elif action == "move_object":
+    elif action == "move_object":       # to xyz, or (follow_camera: d) d metres in front of the camera from now on
         with sim._lock:
-            sim.scene.get(event["object"])["xyz"] = [float(v) for v in event["xyz"]]
+            obj = sim.scene.get(event["object"])
+            if event.get("follow_camera"):
+                obj["follow_camera"] = float(event["follow_camera"])
+            else:
+                obj["xyz"] = [float(v) for v in event["xyz"]]
             sim.scene.version += 1
     else:
         raise EvalError(f"unknown event {action!r}")
@@ -688,6 +753,7 @@ class Evaluator:
                "reason": result.reason if result else "error", "operator": judge, "sim": env.sim,
                "audit": trial_audit, "summary": result.summary if result else ""}
         passed, failures = check_trial(task["check"], ctx) if error is None else (False, [error])
+        done_share = progress(task["check"], ctx) if error is None else None
 
         model_id = next((e.get("model") for e in trace.entries
                          if e.get("kind") in ("llm", "claude_code_init", "codex_init") and e.get("model")), None)
@@ -702,7 +768,8 @@ class Evaluator:
             "kind": "trial", "key": job.key, "suite_task": task["id"], "tier": task["tier"], "mode": job.mode,
             "model": job.model.label, "provider": job.model.provider, "model_id": model_id, "trial": job.trial,
             "split": task.get("split", "dev"), "family": task.get("family", task["id"]), "pair": task.get("pair"),
-            "params": task.get("params_used") or {}, "seed": self.seed,
+            "params": task.get("params_used") or {}, "seed": self.seed, "level": task.get("level"),
+            "budget": self.budget(task), "progress": done_share,
             "skills": "on" if self.skills_on else "off", "success": passed, "failures": failures,
             "claimed": bool(result and result.success), "reason": ctx["reason"], "error": error,
             "summary": result.summary[:300] if result else None,
@@ -717,8 +784,15 @@ class Evaluator:
             "versions": self.versions, "time": datetime.now().isoformat(timespec="seconds"),
         }
 
+    def budget(self, task: dict) -> dict:
+        """The run limits for a task: config.yaml's, with the task's `budget` on top (long tasks need more)."""
+        cfg, own = self.config, task.get("budget") or {}
+        return {"max_turns": int(own.get("max_turns", cfg["max_turns"])),
+                "max_steps": int(own.get("max_steps", cfg["max_steps"])),
+                "timeout": int(own["timeout"]) if "timeout" in own else None}     # None: the CLI agent's own
+
     def _run_agent(self, job: Job, env: Env, trace: Trace, allow_motion: bool, operator):
-        cfg = self.config
+        cfg, budget = self.config, self.budget(job.task)
         if job.model.provider in CLI_AGENTS:
             from k1_agent.claude_code import ClaudeCodeRunner
             from k1_agent.codex import CodexRunner
@@ -727,12 +801,13 @@ class Evaluator:
                 cc, runner_class, extra = cfg.get("claude_code") or {}, ClaudeCodeRunner, {}
             else:   # Codex reports tokens, not cost
                 cc, runner_class, extra = cfg.get("codex") or {}, CodexRunner, {"pricing": self.pricing}
-            flags = (["--allow-motion"] if allow_motion else []) + ["--max-steps", str(cfg["max_steps"]),
+            flags = (["--allow-motion"] if allow_motion else []) + ["--max-steps", str(budget["max_steps"]),
                                                                     "--profile", job.task.get("profile", "teach")]
             runner = runner_class(env.client, trace, env.client.http_url, cfg["config_path"], flags,
                                   model=job.model.model if job.model.model != "default" else None,
                                   command=cc.get("command") or CLI_AGENTS[job.model.provider],
-                                  use_api_key=bool(cc.get("use_api_key")), timeout=cc.get("timeout", 900), **extra)
+                                  use_api_key=bool(cc.get("use_api_key")),
+                                  timeout=budget["timeout"] or cc.get("timeout", 900), **extra)
             return runner.run(job.task["prompt"], job.mode)
 
         from k1_agent.primitives import Primitives
@@ -744,11 +819,11 @@ class Evaluator:
             provider = env.providers.get(job.model) or make_api_provider(job.model)
             env.providers[job.model] = provider
         prims = Primitives(env.client, trace, allow_motion=allow_motion, allow_enable=False,
-                           max_steps=cfg["max_steps"], max_step_rad=cfg["max_step_rad"], tolerance=cfg["tolerance"],
+                           max_steps=budget["max_steps"], max_step_rad=cfg["max_step_rad"], tolerance=cfg["tolerance"],
                            move_timeout=cfg["move_timeout"])
         toolbox = ArmToolbox(prims, SkillLibrary(self.skills_dir), operator, profile=job.task.get("profile", "teach"),
                              program_timeout=cfg["program_timeout"])
-        runner = AgentRunner(provider, toolbox, trace, operator, max_turns=cfg["max_turns"],
+        runner = AgentRunner(provider, toolbox, trace, operator, max_turns=budget["max_turns"],
                              image_history=cfg["image_history"], max_tokens=cfg["max_tokens"], pricing=self.pricing)
         if job.mode == "code":
             return runner.run_code(job.task["prompt"], attempts=cfg["attempts"])
