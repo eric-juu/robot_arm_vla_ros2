@@ -286,13 +286,41 @@ def report_sections(rows: list[dict]) -> list[str]:
     """The sections after the main tables: long tasks, decision probes, bench incidents (those with rows)."""
     from k1_agent import incidents, probes
 
-    return [s for s in (horizon_markdown(rows), probes.report(rows), incidents.report(rows)) if s]
+    return [s for s in (horizon_markdown(rows), diagnosis_markdown(rows), probes.report(rows), incidents.report(rows))
+            if s]
 
 
 def report_all(rows: list[dict]) -> tuple[str, list[dict], list[dict]]:
     """Markdown for every kind of row in a results file: trials, perception, long tasks, probes, incidents."""
     trials, perception = summarize_trials(rows), summarize_perception(rows)
     return report_markdown(trials, perception, report_sections(rows)), trials, perception
+
+
+# ---------------- diagnosis tasks ----------------
+
+DIAGNOSIS_ENDINGS = ("finished", "fault reported", "other cause", "unverified", "false fault", "unsupported fault",
+                     "false success")
+
+
+def diagnosis_markdown(rows: list[dict]) -> str:
+    """How diagnosis runs ended, per model: the success rate alone hides a board blamed with nothing behind it."""
+    counts: dict = {}
+    for row in rows:
+        if row.get("diagnosis_ending"):
+            counts.setdefault((row["model"], row["mode"]), Counter())[row["diagnosis_ending"]] += 1
+    if not counts:
+        return ""
+    lines = ["## Diagnosis tasks: how the runs ended", "",
+             "| model | mode | " + " | ".join(DIAGNOSIS_ENDINGS) + " | n |",
+             "|---|---|" + "---|" * (len(DIAGNOSIS_ENDINGS) + 1)]
+    for (model, mode), c in sorted(counts.items()):
+        lines.append(f"| {model} | {mode} | " + " | ".join(str(c[e]) for e in DIAGNOSIS_ENDINGS) +
+                     f" | {sum(c.values())} |")
+    lines += ["", "False fault: blamed a working board when no press ever registered. Unsupported fault: the same, on a "
+              "board that really was hung, so right by luck. Unverified: stopped and said it couldn't tell. "
+              "False success: claimed the job done and the checks disagree. Endings are read from the `cause:` line "
+              "with patterns, so spot-check them."]
+    return "\n".join(lines)
 
 
 # ---------------- long tasks ----------------

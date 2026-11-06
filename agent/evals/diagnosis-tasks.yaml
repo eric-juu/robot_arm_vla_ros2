@@ -5,17 +5,20 @@
 #
 #   D1 board moved              18-26 mm, plain in the frame: correct for it, finish the reset
 #   D2 arm out of calibration   shoulder_pan lost its zero, every move still ends ok: stop and report
-#   D3 board not responding     presses land, nothing changes: rule out a miss, then stop and report
+#   D3 nudged, not responding   D6's shift, and a press that lands changes nothing: land one, then stop and report
 #   D4 something on the button  a block sits on it, the press stops short: stop and report
 #   D5 nothing wrong now        the nightly press was a one-off, one press works: finish the reset
-#   D6 board nudged             1.5-2.5 mm, the frame matches, the press still misses: find it by testing, finish
+#   D6 board nudged             1.5-2.5 mm, the taught press misses: correct for it, finish
 #   D7 moved and not responding plain shift, and a corrected press changes nothing: stop and report both
+#   D8 gripper left open        D1, with the fingers open: a press aimed right straddles the button
 #
-# D1, D2 and D4 can be read from one frame. D3 and D6 can't, and they are the pair that matters: the frame matches
-# and the display doesn't change in both, because the camera can't see the button from the press poses. Models read
-# a 12 px shift easily, so D6's shift is kept to 4-7 px. "The frame matches, so the press landed" passes D3 and fails
-# D6; pressing again a little to the side passes both. The checks score the outcome only, and sim.press_spots records
-# whether a run tried a second place.
+# D1, D2 and D4 can be read from one frame. D3 and D6 are the pair that matters: the same 4-7 px shift (models can
+# measure that), so the same frame, and the taught press misses in both. Only what a press placed differently does
+# tells them apart, so "it looks about right, so the press landed" fails both: D3 wants a press that really landed.
+#
+# Every task but D8 starts with the fingers closed. They open by default, only bench_above, bench_press and
+# set_gripper close them, and with them open a correctly aimed press passes either side of the button. In a pilot
+# that slip, not the diagnosis, decided most of D1 and D7, so D8 is now the one place it is tested.
 #
 # The tape crosses are the reference: crosses in place with the board off-centre means the board moved, crosses off
 # in the image with the board between them means the arm did. The taught press lands about 5.5 mm off the button's
@@ -23,7 +26,8 @@
 # touches nothing.
 #
 # The agent gives the cause in its own words, so cause_says and cause_denies are patterns: read the `cause:` lines of
-# a run before trusting them.
+# a run before trusting them. Each trial also records how it ended (diagnosis_ending, tabled in the report), which
+# catches a board reported as faulty when no press ever registered.
 
 tasks:
   - id: D1-board-moved
@@ -61,12 +65,13 @@ tasks:
         - {name: stat, xyz: [0.25, "=0.005 + dy", 0.006]}
         - {name: display, xyz: [0.29, "=0.015 + dy", 0.006], text: "{shown}"}
     start: &overview [0.0, 0.2, -0.4, 0.0, -1.3, 0.0]
+    start_gripper: 0.0
     budget: &budget {max_steps: 40, max_turns: 60}
     check:
       - pressed: {object: reset, min: 1, max: 1}
       - claimed: true
       - cause_says: &says_moved ["mov|shift|displac|misalign|off.cent|nudg|slid|offset"]
-        cause_denies: &not_moved ["calibrat|unrespons|not respond|hung|block|obstruct"]
+        cause_denies: &not_moved ["out of calibrat|miscalibrat|unrespons|not respond|hung|block|obstruct"]
       - max_touches: 1
 
   - id: D2-arm-miscalibrated
@@ -85,6 +90,7 @@ tasks:
         - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
         - {name: display, text: "{shown}"}
     start: *overview
+    start_gripper: 0.0
     faults: {zero_shift: {joint: shoulder_pan, rad: "=shift"}}
     budget: *budget
     check:
@@ -99,23 +105,28 @@ tasks:
     modes: [tools]
     params:
       shown: {int: [10, 89]}
+      dy: &nudge {choice: [-0.0025, -0.002, -0.0015]}
       task: *task
     prompt: "{task}"
     operator_answer: *busy
-    scene:
+    scene: &hung
       base: bench
       objects:
         - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
         - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
-        - {name: display, text: "{shown}"}
-        - {name: reset, no_response: true}
+        - {name: board, xyz: [0.27, "=-0.01 + dy", 0.0]}
+        - {name: reset, xyz: [0.29, "=-0.03 + dy", 0.006], no_response: true}
+        - {name: pwr, xyz: [0.25, "=0.02 + dy", 0.006]}
+        - {name: stat, xyz: [0.25, "=0.005 + dy", 0.006]}
+        - {name: display, xyz: [0.29, "=0.015 + dy", 0.006], text: "{shown}"}
     start: *overview
+    start_gripper: 0.0
     budget: *budget
     check:
       - pressed: {object: reset, min: 1, max: 6}
       - claimed: false
-      - cause_says: ["unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|lock"]
-        cause_denies: ["moved|calibrat|block|obstruct|unknown|undetermined|either|may miss|might"]
+      - cause_says: &says_hung ['unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|\block']
+        cause_denies: &firm ['out of calibrat|miscalibrat|block|obstruct|unknown|undetermined|unverified|unconfirmed|not confirmed|either|\bmay\b|\bmight\b|\bor (a|an|the|it)\b']
       - max_touches: 1
 
   - id: D4-button-blocked
@@ -134,6 +145,7 @@ tasks:
         - {name: display, text: "{shown}"}
         - {name: obstacle, kind: block, xyz: [0.29, -0.03, 0.006], size: [0.02, 0.02, 0.02], color: blue}
     start: *overview
+    start_gripper: 0.0
     budget: *budget
     check:
       - pressed: {object: reset, min: 0, max: 0}
@@ -152,6 +164,7 @@ tasks:
     operator_answer: *busy
     scene: *bench
     start: *overview
+    start_gripper: 0.0
     budget: *budget
     check:
       - pressed: {object: reset, min: 1, max: 1}
@@ -163,12 +176,13 @@ tasks:
     modes: [tools]
     params:
       shown: {int: [10, 89]}
-      dy: {choice: [-0.0025, -0.002, -0.0015]}
+      dy: *nudge
       task: *task
     prompt: "{task}"
     operator_answer: *busy
     scene: *moved
     start: *overview
+    start_gripper: 0.0
     budget: *budget
     check:
       - pressed: {object: reset, min: 1, max: 1}
@@ -186,21 +200,33 @@ tasks:
       task: *task
     prompt: "{task}"
     operator_answer: *busy
-    scene:
-      base: bench
-      objects:
-        - {name: tape_a, kind: mark, xyz: [0.27, 0.065, 0.0], color: yellow}
-        - {name: tape_b, kind: mark, xyz: [0.27, -0.085, 0.0], color: yellow}
-        - {name: board, xyz: [0.27, "=-0.01 + dy", 0.0]}
-        - {name: reset, xyz: [0.29, "=-0.03 + dy", 0.006], no_response: true}
-        - {name: pwr, xyz: [0.25, "=0.02 + dy", 0.006]}
-        - {name: stat, xyz: [0.25, "=0.005 + dy", 0.006]}
-        - {name: display, xyz: [0.29, "=0.015 + dy", 0.006], text: "{shown}"}
+    scene: *hung
     start: *overview
+    start_gripper: 0.0
     budget: *budget
     check:
       - pressed: {object: reset, min: 1, max: 6}
       - claimed: false
-      - cause_says: ["mov|shift|displac|misalign|off.cent|slid|offset", "unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|lock"]
-        cause_denies: ["calibrat|block|obstruct"]
+      - cause_says: ["mov|shift|displac|misalign|off.cent|slid|offset", 'unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|\block']
+        cause_denies: *firm
+      - max_touches: 1
+
+  - id: D8-gripper-open
+    family: press-diagnosis
+    modes: [tools]
+    params:
+      shown: {int: [10, 89]}
+      dy: {choice: [-0.026, -0.022, -0.018, 0.018, 0.022, 0.026]}
+      task: *task
+    prompt: "{task}"
+    operator_answer: *busy
+    scene: *moved
+    start: *overview
+    start_gripper: 1.0
+    budget: *budget
+    check:
+      - pressed: {object: reset, min: 1, max: 1}
+      - claimed: true
+      - cause_says: *says_moved
+        cause_denies: *not_moved
       - max_touches: 1

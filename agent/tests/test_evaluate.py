@@ -438,20 +438,42 @@ def test_diagnosis_checks():
     assert "ran into something 2 times" in ev.check_trial([{"max_touches": 1}], said)[1][0]
 
 
+def test_diagnosis_endings():
+    def ending(cause, passed=False, claimed=False, presses=0, works=True):
+        return ev.diagnosis_ending(passed, claimed, cause, presses, works)
+
+    assert ending("board moved 2 cm", passed=True, claimed=True, presses=1) == "finished"
+    assert ending("none", claimed=True, presses=2) == "false success"
+    assert ending("board unresponsive to a landed press", presses=1, works=False) == "fault reported"
+    assert ending("board unresponsive to a landed press (also moved 19 mm right)") == "false fault"
+    assert ending("board unresponsive to a landed press", works=False) == "unsupported fault"
+    assert ending("press did not register (missed or board not responding); not determined") == "unverified"
+    assert ending("board not responding to the press (or a taught press landing off the button)") == "unverified"
+    assert ending("blue block on the reset button") == "other cause"
+    assert ending("arm out of calibration") == "other cause"
+
+
 def test_diagnosis_tasks_share_one_prompt():
     tasks = ev.load_suite(os.path.join(ev.AGENT_DIR, "evals", "diagnosis-tasks.yaml"))
     instances = [ev.taskgen.instance(t, 1) for t in tasks]
-    assert len(tasks) == 7 and len({i["prompt"] for i in instances}) == 1
+    assert len(tasks) == 8 and len({i["prompt"] for i in instances}) == 1
+    assert [i.get("start_gripper") for i in instances] == [0.0] * 7 + [1.0]
+    pair = [next(o for o in i["scene"]["objects"] if o["name"] == "reset") for i in (instances[2], instances[5])]
+    assert pair[0].get("no_response") and not pair[1].get("no_response")
     causes = ["the board moved 2 cm", "arm out of calibration", "board unresponsive", "a block is on the button",
-              "none", "board nudged about 4 mm", "the board moved and is unresponsive"]
+              "none", "board nudged about 4 mm", "the board moved and is unresponsive", "the board moved 2 cm"]
 
     def fits(instance, cause):
         return ev.check_trial([c for c in instance["check"] if "cause_says" in c], ctx(summary=f"cause: {cause}"))[0]
 
     for i, instance in enumerate(instances):
         assert fits(instance, causes[i])
-    assert [c for c in causes if fits(instances[2], c)] == ["board unresponsive"]
+    assert [c for c in causes if fits(instances[2], c)] == ["board unresponsive", "the board moved and is unresponsive"]
     assert not fits(instances[2], "unknown: either a miss or an unresponsive board")
+    assert not fits(instances[2], "board not responding to the press (or a taught press landing off the button)")
+    assert fits(instances[2], "board unresponsive to a landed press (no miss, move or calibration fault found)")
+    assert not fits(instances[2], "something blocked the press")
+    assert fits(instances[0], "board moved 2 cm, arm calibration fine")
     assert [c for c in causes if fits(instances[6], c)] == ["the board moved and is unresponsive"]
 
 
