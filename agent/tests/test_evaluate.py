@@ -450,6 +450,26 @@ def test_effort_reaches_claude_code_and_codex_refuses_it():
         ev.parse_model("codex:gpt-6-astra@high")
 
 
+def test_diagnosis_tasks_get_the_same_shifts_by_trial():
+    tasks = {t["id"][:2]: t for t in ev.load_suite(os.path.join(ev.AGENT_DIR, "evals", "diagnosis-tasks.yaml"))}
+    shifts = lambda key, seed: [ev.taskgen.instance(tasks[key], t, seed)["params_used"]["dy"] for t in range(1, 9)]
+    assert shifts("D3", 1) == shifts("D6", 2)
+    assert shifts("D1", 1) == shifts("D7", 2) == shifts("D8", 3)
+    assert sorted(set(shifts("D3", 1))) == [-0.0025, -0.002, -0.0015]
+
+
+def test_trials_with_no_price_count_against_the_budget(tmp_path):
+    config = {"skills_dir": str(tmp_path / "none"), "config_path": str(tmp_path / "config.yaml")}
+    run = ev.Evaluator(config, str(tmp_path / "run"), max_cost_usd=3.0, log=lambda *a: None)
+    run.write({"kind": "trial", "key": "a", "model": "m", "cost_usd": 1.0, "wall_s": 100.0})
+    run.write({"kind": "trial", "key": "b", "model": "m", "cost_usd": None, "wall_s": 150.0})
+    assert run.spent == 1.0 and run.estimated() == pytest.approx(1.5) and not run.over_budget()
+    run.write({"kind": "trial", "key": "c", "model": "new", "cost_usd": None, "wall_s": 50.0})
+    assert run.estimated() == pytest.approx(2.0) and run.over_budget()      # no priced trial: the dearest rate
+    again = ev.Evaluator(config, str(tmp_path / "run"), max_cost_usd=3.0, log=lambda *a: None)
+    assert again.done_keys() == {"a", "b", "c"} and again.over_budget()     # --resume remembers them
+
+
 def test_diagnosis_endings():
     def ending(cause, passed=False, claimed=False, presses=0, works=True):
         return ev.diagnosis_ending(passed, claimed, cause, presses, works)

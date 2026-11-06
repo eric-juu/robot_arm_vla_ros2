@@ -67,6 +67,13 @@ def test_templates():
     assert taskgen.instance({"id": "S", "tier": 1, "prompt": "p", "check": []}, 3)["params_used"] == {}
 
 
+def test_a_cycle_goes_by_trial_number_whatever_the_seed():
+    task = {"id": "C", "tier": 1, "params": {"dy": {"cycle": [1, 2, 3]}, "twice": "=dy * 2"}, "prompt": "{twice}",
+            "check": []}
+    assert [taskgen.instance(task, t, seed=t * 7)["params_used"]["dy"] for t in range(1, 8)] == [1, 2, 3, 1, 2, 3, 1]
+    assert taskgen.instance(task, 2)["prompt"] == "4"
+
+
 def test_lists_waypoints_and_levels():
     rng = random.Random(4)
     names = taskgen.sample({"n": 12, "codes": {"int": [10, 12], "count": "=n"},

@@ -8,6 +8,7 @@ repeated, and tuning skills on a fixed prompt can't inflate the score.
       delta: {choice: [-0.3, -0.2, 0.2, 0.3]}
       bx: {uniform: [0.27, 0.32], round: 3}
       target: "=delta * 2"                 # computed from the params above
+      shift: {cycle: [-0.002, -0.001]}     # by trial number, not random: trial 1 the first, trial 2 the next...
     prompt: "Move {joint} by {delta} rad, then finish."
     check:
       - joints: {"{joint}": "=delta"}
@@ -152,11 +153,14 @@ def _waypoints(s: dict, count: int, rng: random.Random) -> list[dict]:
     return tour
 
 
-def sample(spec: dict | None, rng: random.Random) -> dict:
-    """Draw one value per param, in order; later params may be expressions over earlier ones."""
+def sample(spec: dict | None, rng: random.Random, trial: int = 1) -> dict:
+    """Draw one value per param, in order; later params may be expressions over earlier ones. A `cycle` goes by trial
+    number, so tasks that share one get the same mix of values, whatever the seed."""
     names: dict = {}
     for name, s in (spec or {}).items():
-        if isinstance(s, dict) and "waypoints" in s:
+        if isinstance(s, dict) and "cycle" in s:
+            value = s["cycle"][(trial - 1) % len(s["cycle"])]
+        elif isinstance(s, dict) and "waypoints" in s:
             value = _waypoints(s, _count(s["waypoints"], names), rng)
         elif isinstance(s, dict) and any(k in s for k in ("choice", "uniform", "int")):
             value = _sequence(s, _count(s["count"], names), rng) if "count" in s else _draw(s, rng)
@@ -196,6 +200,6 @@ def instance(task: dict, trial: int, seed: int = 0) -> dict:
     if not task.get("params"):
         return dict(task, params_used={})
     rng = random.Random(f"{seed}|{task['id']}|{trial}")
-    names = sample(task["params"], rng)
+    names = sample(task["params"], rng, trial)
     body = {k: v for k, v in copy.deepcopy(task).items() if k not in ("params", "id", "tier")}
     return {"id": task["id"], "tier": task["tier"], **fill(body, names), "params_used": names}

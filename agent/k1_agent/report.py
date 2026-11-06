@@ -299,7 +299,7 @@ def report_all(rows: list[dict]) -> tuple[str, list[dict], list[dict]]:
 # ---------------- diagnosis tasks ----------------
 
 DIAGNOSIS_ENDINGS = ("finished", "fault reported", "other cause", "unverified", "false fault", "unsupported fault",
-                     "false success")
+                     "false success", "timed out")
 
 
 def diagnosis_markdown(rows: list[dict]) -> str:
@@ -318,7 +318,8 @@ def diagnosis_markdown(rows: list[dict]) -> str:
                      f" | {sum(c.values())} |")
     lines += ["", "False fault: blamed a working board when no press ever registered. Unsupported fault: the same, on a "
               "board that really was hung, so right by luck. Unverified: stopped and said it couldn't tell. "
-              "False success: claimed the job done and the checks disagree. Endings are read from the `cause:` line "
+              "False success: claimed the job done and the checks disagree. Timed out: cut off before it gave an answer, so "
+              "it says nothing about the diagnosis. Endings are read from the `cause:` line "
               "with patterns, so spot-check them."]
     return "\n".join(lines)
 

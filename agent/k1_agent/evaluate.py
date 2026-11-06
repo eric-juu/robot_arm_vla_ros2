@@ -684,6 +684,8 @@ class Evaluator:
         self.operator_model = operator_model or "claude-haiku-5-5"      # plays the operator in `operator: {llm}`
         self.spent = 0.0
         self.unpriced = 0
+        self.priced_runs: dict = {}         # model -> [dollars, seconds] of the trials that have a price
+        self.unpriced_s: dict = {}          # model -> seconds of the trials that don't
         self._lock = threading.Lock()
 
     # -- results file --
@@ -696,20 +698,35 @@ class Evaluator:
                     row = json.loads(line)
                     if row.get("kind") == "trial":
                         keys.add(row["key"])
-                        self.spent += row.get("cost_usd") or 0.0
+                        self.count_cost(row)
         return keys
 
     def write(self, row: dict):
         with self._lock:
             with open(self.results_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, default=str) + "\n")
-            if row.get("cost_usd") is not None:
-                self.spent += row["cost_usd"]
-            else:
-                self.unpriced += 1
+            self.count_cost(row)
+
+    def count_cost(self, row: dict):
+        model, seconds = row.get("model"), row.get("wall_s") or 0.0
+        if row.get("cost_usd") is not None:
+            self.spent += row["cost_usd"]
+            totals = self.priced_runs.setdefault(model, [0.0, 0.0])
+            totals[0] += row["cost_usd"]
+            totals[1] += seconds
+        else:
+            self.unpriced += 1
+            self.unpriced_s[model] = self.unpriced_s.get(model, 0.0) + seconds
+
+    def estimated(self) -> float:
+        """What the trials with no price probably cost. A trial cut off by a timeout never reports its cost but still
+        spent money, so it counts at its model's dollars per second, or the dearest model's if it has no priced trial."""
+        rates = {m: dollars / seconds for m, (dollars, seconds) in self.priced_runs.items() if seconds}
+        dearest = max(rates.values(), default=0.0)
+        return sum(seconds * rates.get(m, dearest) for m, seconds in self.unpriced_s.items())
 
     def over_budget(self) -> bool:
-        return self.max_cost_usd is not None and self.spent >= self.max_cost_usd
+        return self.max_cost_usd is not None and self.spent + self.estimated() >= self.max_cost_usd
 
     # -- one trial --
 
@@ -802,9 +819,10 @@ class Evaluator:
             scene = env.sim.scene
             if task.get("family") == "press-diagnosis" and error is None:
                 buttons = [o for o in scene.objects if o["kind"] == "button"]
-                ending = diagnosis_ending(passed, ctx["success"], stated_cause(ctx["summary"]),
-                                          sum(b["presses"] for b in buttons),
-                                          not any(b.get("no_response") for b in buttons))
+                ending = "timed out" if ctx["reason"] == "timeout" else \
+                    diagnosis_ending(passed, ctx["success"], stated_cause(ctx["summary"]),
+                                     sum(b["presses"] for b in buttons),
+                                     not any(b.get("no_response") for b in buttons))
             sim_info = {"contacts": env.sim.contacts, "touches": env.sim.touches, "press_spots": scene.press_spots(),
                         "press_tries": len(scene.press_tries),
                         "held": scene.held["name"] if scene.held else None,
@@ -1004,8 +1022,9 @@ def run_suite(config: dict, tasks: list[dict], models: list[ModelSpec], out_dir:
         stop_all.set()
         log("interrupted; finished trials are saved (rerun with --resume to continue)")
         raise
-    log(f"spent about ${evaluator.spent:.2f}" + (f"; {evaluator.unpriced} trials had no price (see pricing.yaml)"
-                                                  if evaluator.unpriced else ""))
+    log(f"spent about ${evaluator.spent:.2f}" +
+        (f"; {evaluator.unpriced} trials had no price (see pricing.yaml), probably about "
+         f"${evaluator.estimated():.2f} more" if evaluator.unpriced else ""))
     return evaluator.results_path
 
 

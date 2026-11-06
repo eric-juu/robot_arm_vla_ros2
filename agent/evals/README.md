@@ -96,6 +96,8 @@ To add a task, the top of `tasks.yaml` explains every field and check. A minimal
       others_unchanged: true
 ```
 
+A param can be `{choice: [...]}`, picked at random per trial, or `{cycle: [...]}`, picked by trial number so tasks that share it get the same mix of values at any seed.
+
 `evals/sim-skills/` holds code skills that use the simulator's taught poses; they're copied into a tier-1 run's skill library. Run `python -m pytest tests/test_evaluate.py` after changing the harness.
 
 ## Long tasks
