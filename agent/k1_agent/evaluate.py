@@ -272,7 +272,7 @@ def stated_cause(summary: str | None) -> str:
 
 
 DIAGNOSIS_HEDGE = (r"unverified|unconfirmed|not confirmed|not verified|undetermined|unresolved|not determined|"
-                   r"not diagnosed|unknown|either|\bmay\b|\bmight\b|\bor (a|an|the|it)\b")
+                   r"not diagnosed|unknown|either|\bmay\b|\bmight\b|\bpossibly\b|\bor (a|an|the|it|my)\b")
 DIAGNOSIS_BLAMES_BOARD = r"unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|\block"
 
 

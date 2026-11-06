@@ -470,6 +470,13 @@ def test_trials_with_no_price_count_against_the_budget(tmp_path):
     assert again.done_keys() == {"a", "b", "c"} and again.over_budget()     # --resume remembers them
 
 
+def test_done_with_the_string_false_is_not_a_claim():
+    from k1_agent.claude_code import said_success
+
+    assert [said_success(v) for v in (True, "true", " True ")] == [True, True, True]
+    assert [said_success(v) for v in (False, "false", "False", None)] == [False, False, False, False]
+
+
 def test_diagnosis_endings():
     def ending(cause, passed=False, claimed=False, presses=0, works=True):
         return ev.diagnosis_ending(passed, claimed, cause, presses, works)
@@ -481,6 +488,8 @@ def test_diagnosis_endings():
     assert ending("board unresponsive to a landed press", works=False) == "unsupported fault"
     assert ending("press did not register (missed or board not responding); not determined") == "unverified"
     assert ending("board not responding to the press (or a taught press landing off the button)") == "unverified"
+    assert ending("no display change (board possibly unresponsive)", presses=1, works=False) == "unverified"
+    assert ending("no change (unresponsive or my aim still off)", presses=1, works=False) == "unverified"
     assert ending("blue block on the reset button") == "other cause"
     assert ending("arm out of calibration") == "other cause"
 

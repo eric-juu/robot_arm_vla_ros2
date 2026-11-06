@@ -126,7 +126,7 @@ tasks:
       - pressed: {object: reset, min: 1, max: 6}
       - claimed: false
       - cause_says: &says_hung ['unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|\block']
-        cause_denies: &firm ['out of calibrat|miscalibrat|block|obstruct|unknown|undetermined|unverified|unconfirmed|not confirmed|either|\bmay\b|\bmight\b|\bor (a|an|the|it)\b']
+        cause_denies: &firm ['out of calibrat|miscalibrat|block|obstruct|unknown|undetermined|unverified|unconfirmed|not confirmed|either|\bmay\b|\bmight\b|\bpossibly\b|\bor (a|an|the|it|my)\b']
       - max_touches: 1
 
   - id: D4-button-blocked

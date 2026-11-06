@@ -30,6 +30,11 @@ from k1_agent.providers.base import Usage
 from k1_agent.runner import RunResult
 from k1_agent.trace import Trace
 
+
+def said_success(value) -> bool:
+    """The `success` of a done call, read from the raw call: a model can send the string "false", which is truthy."""
+    return value.strip().lower() == "true" if isinstance(value, str) else bool(value)
+
 AGENT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -144,7 +149,7 @@ class ClaudeCodeRunner:
         arguments = arguments if isinstance(arguments, dict) else {}
         self.trace.log("tool_call", name=name, arguments=arguments)
         if name == "done":
-            self.outcome = (bool(arguments.get("success")), str(arguments.get("summary", "")))
+            self.outcome = (said_success(arguments.get("success")), str(arguments.get("summary", "")))
         elif name != "note":
             self.note(f"-> {name}({json.dumps(arguments)[:200]})")
 
