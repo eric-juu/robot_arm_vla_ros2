@@ -84,6 +84,8 @@ def parse_model(text: str) -> ModelSpec:
             raise EvalError(f"can't tell the provider of {model!r}; write it as provider:model")
     if provider not in ("anthropic", "openai", "gemini", *CLI_AGENTS):
         raise EvalError(f"unknown provider {provider!r} in {text!r}")
+    if effort and provider == "codex":
+        raise EvalError(f"effort levels aren't supported for codex ({text})")
     return ModelSpec(provider, model, effort or None)
 
 
@@ -804,6 +806,7 @@ class Evaluator:
                                           sum(b["presses"] for b in buttons),
                                           not any(b.get("no_response") for b in buttons))
             sim_info = {"contacts": env.sim.contacts, "touches": env.sim.touches, "press_spots": scene.press_spots(),
+                        "press_tries": len(scene.press_tries),
                         "held": scene.held["name"] if scene.held else None,
                         "presses": {o["name"]: o["presses"] for o in scene.objects if o["kind"] == "button"},
                         "events": env.events_fired}
@@ -842,7 +845,7 @@ class Evaluator:
             from k1_agent.codex import CodexRunner
 
             if job.model.provider == "claude-code":
-                cc, runner_class, extra = cfg.get("claude_code") or {}, ClaudeCodeRunner, {}
+                cc, runner_class, extra = cfg.get("claude_code") or {}, ClaudeCodeRunner, {"effort": job.model.effort}
             else:   # Codex reports tokens, not cost
                 cc, runner_class, extra = cfg.get("codex") or {}, CodexRunner, {"pricing": self.pricing}
             flags = (["--allow-motion"] if allow_motion else []) + ["--max-steps", str(budget["max_steps"]),

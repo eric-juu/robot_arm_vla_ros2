@@ -438,6 +438,18 @@ def test_diagnosis_checks():
     assert "ran into something 2 times" in ev.check_trial([{"max_touches": 1}], said)[1][0]
 
 
+def test_effort_reaches_claude_code_and_codex_refuses_it():
+    from k1_agent.claude_code import ClaudeCodeRunner
+
+    spec = ev.parse_model("claude-code:claude-sonnet-5-5@low")
+    assert spec.effort == "low" and spec.label == "claude-code:claude-sonnet-5-5@low"
+    line = ClaudeCodeRunner(None, None, "http://arm", command=["claude"], effort=spec.effort).command_line("go")
+    assert line[line.index("--effort") + 1] == "low"
+    assert "--effort" not in ClaudeCodeRunner(None, None, "http://arm", command=["claude"]).command_line("go")
+    with pytest.raises(ev.EvalError):
+        ev.parse_model("codex:gpt-6-astra@high")
+
+
 def test_diagnosis_endings():
     def ending(cause, passed=False, claimed=False, presses=0, works=True):
         return ev.diagnosis_ending(passed, claimed, cause, presses, works)

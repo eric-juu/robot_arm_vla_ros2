@@ -76,7 +76,8 @@ class ClaudeCodeRunner:
 
     def __init__(self, client: K1Client, trace: Trace, url: str, config_path: str | None = None,
                  mcp_args: list[str] | None = None, model: str | None = None, command: str = "claude",
-                 use_api_key: bool = False, max_budget_usd: float | None = None, timeout: float = 900.0):
+                 use_api_key: bool = False, max_budget_usd: float | None = None, timeout: float = 900.0,
+                 effort: str | None = None):
         self.client = client
         self.trace = trace
         self.url = url
@@ -87,6 +88,7 @@ class ClaudeCodeRunner:
         self.use_api_key = use_api_key
         self.max_budget_usd = max_budget_usd
         self.timeout = timeout
+        self.effort = effort                    # low | medium | high | xhigh | max; None = the CLI's default
         self.usage: Usage | None = None
         self.cost_usd: float | None = None      # Claude Code's own estimate, at API prices
         self.turns = 0
@@ -112,6 +114,8 @@ class ClaudeCodeRunner:
                "--append-system-prompt", system_rules(), "--no-session-persistence"]
         if self.model:
             cmd += ["--model", self.model]
+        if self.effort:
+            cmd += ["--effort", self.effort]
         if self.max_budget_usd:
             cmd += ["--max-budget-usd", str(self.max_budget_usd)]
         return cmd

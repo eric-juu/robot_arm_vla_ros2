@@ -100,7 +100,7 @@ def build_task_runner(config, args, client, log=print, spec=None):
     profile = args.profile or config["profile"]
 
     if provider_name in ("claude-code", "codex"):      # a coding agent's CLI, signed in to its own account
-        if effort:
+        if effort and provider_name == "codex":
             raise ValueError(f"effort levels aren't supported for {provider_name} ({spec.label})")
         if provider_name == "claude-code":
             from k1_agent.claude_code import ClaudeCodeRunner as Runner, login_status
@@ -108,6 +108,7 @@ def build_task_runner(config, args, client, log=print, spec=None):
             cc, label, extra = config.get("claude_code") or {}, "Claude Code", {}
             command = cc.get("command") or "claude"
             extra["max_budget_usd"] = cc.get("max_budget_usd")
+            extra["effort"] = effort
             error, sign_in = ClaudeCodeError, "`k1-agent login`"
         else:
             from k1_agent.codex import CodexError, CodexRunner as Runner, login_status
