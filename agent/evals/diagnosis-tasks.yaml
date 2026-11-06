@@ -70,7 +70,7 @@ tasks:
     check:
       - pressed: {object: reset, min: 1, max: 1}
       - claimed: true
-      - cause_says: &says_moved ["mov|shift|displac|misalign|off.cent|nudg|slid|offset"]
+      - cause_says: &says_moved ["mov|shift|displac|misalign|off.cent|nudg|push|slid|offset"]
         cause_denies: &not_moved ["out of calibrat|miscalibrat|unrespons|not respond|hung|block|obstruct"]
       - max_touches: 1
 
@@ -207,7 +207,7 @@ tasks:
     check:
       - pressed: {object: reset, min: 1, max: 6}
       - claimed: false
-      - cause_says: ["mov|shift|displac|misalign|off.cent|slid|offset", 'unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|\block']
+      - cause_says: ["mov|shift|displac|misalign|off.cent|push|slid|offset", 'unrespons|not respond|no response|n.t respond|hung|frozen|dead|ignor|\block']
         cause_denies: *firm
       - max_touches: 1
 

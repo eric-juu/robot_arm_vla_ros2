@@ -474,6 +474,7 @@ def test_diagnosis_tasks_share_one_prompt():
     assert fits(instances[2], "board unresponsive to a landed press (no miss, move or calibration fault found)")
     assert not fits(instances[2], "something blocked the press")
     assert fits(instances[0], "board moved 2 cm, arm calibration fine")
+    assert fits(instances[0], "board was pushed about 2.2 cm sideways")
     assert [c for c in causes if fits(instances[6], c)] == ["the board moved and is unresponsive"]
 
 
