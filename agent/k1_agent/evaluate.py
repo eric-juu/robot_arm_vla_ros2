@@ -49,6 +49,7 @@ CHECK_KEYS = {"joints", "tol", "others_unchanged", "gripper", "visited", "claime
               "no_enable", "not_asked", "summary_contains", "summary_in_order", "max_touches", "cause_says", "cause_denies"}
 BUDGET_KEYS = {"max_turns", "max_steps", "timeout"}     # per-task run limits, overriding config.yaml (long tasks)
 SIM_SKILLS = os.path.join(AGENT_DIR, "evals", "sim-skills")     # code skills that use the simulator's taught poses
+PROGRAMS = os.path.join(AGENT_DIR, "evals", "programs")         # frozen programs, run as `program:<name>`
 
 
 class EvalError(Exception):
@@ -59,7 +60,7 @@ class EvalError(Exception):
 
 @dataclass(frozen=True)
 class ModelSpec:
-    provider: str           # anthropic | openai | gemini | claude-code | codex
+    provider: str           # anthropic | openai | gemini | claude-code | codex | program
     model: str
     effort: str | None = None
 
@@ -82,10 +83,12 @@ def parse_model(text: str) -> ModelSpec:
             provider = "openai"
         else:
             raise EvalError(f"can't tell the provider of {model!r}; write it as provider:model")
-    if provider not in ("anthropic", "openai", "gemini", *CLI_AGENTS):
+    if provider not in ("anthropic", "openai", "gemini", "program", *CLI_AGENTS):
         raise EvalError(f"unknown provider {provider!r} in {text!r}")
-    if effort and provider == "codex":
-        raise EvalError(f"effort levels aren't supported for codex ({text})")
+    if effort and provider in ("codex", "program"):
+        raise EvalError(f"effort levels aren't supported for {provider} ({text})")
+    if provider == "program" and not os.path.exists(os.path.join(PROGRAMS, model + ".py")):
+        raise EvalError(f"no program {model!r} in {PROGRAMS}")
     return ModelSpec(provider, model, effort or None)
 
 
@@ -812,7 +815,7 @@ class Evaluator:
         done_share = progress(task["check"], ctx) if error is None else None
 
         model_id = next((e.get("model") for e in trace.entries
-                         if e.get("kind") in ("llm", "claude_code_init", "codex_init") and e.get("model")), None)
+                         if e.get("kind") in ("llm", "claude_code_init", "codex_init", "program") and e.get("model")), None)
         usage = result.usage.as_dict() if result is not None and result.usage is not None else None
         sim_info = ending = None
         if env.sim is not None and env.sim.scene is not None:
@@ -876,18 +879,21 @@ class Evaluator:
             return runner.run(job.task["prompt"], job.mode)
 
         from k1_agent.primitives import Primitives
-        from k1_agent.runner import AgentRunner
+        from k1_agent.runner import AgentRunner, run_frozen_program
         from k1_agent.skills import SkillLibrary
         from k1_agent.tools import ArmToolbox
 
-        with self._lock:
-            provider = env.providers.get(job.model) or make_api_provider(job.model)
-            env.providers[job.model] = provider
         prims = Primitives(env.client, trace, allow_motion=allow_motion, allow_enable=False,
                            max_steps=budget["max_steps"], max_step_rad=cfg["max_step_rad"], tolerance=cfg["tolerance"],
                            move_timeout=cfg["move_timeout"])
         toolbox = ArmToolbox(prims, SkillLibrary(self.skills_dir), operator, profile=job.task.get("profile", "teach"),
                              program_timeout=cfg["program_timeout"])
+        if job.model.provider == "program":
+            with open(os.path.join(PROGRAMS, job.model.model + ".py"), encoding="utf-8") as f:
+                return run_frozen_program(toolbox, job.model.model, f.read())
+        with self._lock:
+            provider = env.providers.get(job.model) or make_api_provider(job.model)
+            env.providers[job.model] = provider
         runner = AgentRunner(provider, toolbox, trace, operator, max_turns=budget["max_turns"],
                              image_history=cfg["image_history"], max_tokens=cfg["max_tokens"], pricing=self.pricing)
         if job.mode == "code":
@@ -909,7 +915,9 @@ def plan_jobs(tasks: list[dict], models: list[ModelSpec], modes: list[str] | Non
             task_modes = allowed[:1] if modes is None else [m for m in allowed if m in modes]
             shuffled = list(models)
             rng.shuffle(shuffled)
-            jobs += [Job(task, model, mode, trial) for mode in task_modes for model in shuffled]
+            jobs += [Job(task, model, mode, trial) for mode in task_modes for model in shuffled
+                     if model.provider != "program"]
+            jobs += [Job(task, model, "program", trial) for model in shuffled if model.provider == "program"]
     return jobs
 
 

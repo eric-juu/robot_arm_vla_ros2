@@ -12,6 +12,7 @@ The tools, their schemas and the system prompt come from the toolbox (tools.py, 
 Claude Code and Codex get over MCP. After a success the operator can accept a skill drafted from the run
 (with the program, in code mode). It goes to skills/pending/ until approved with `k1-agent skills approve`.
 """
+import hashlib
 import json
 import re
 import time
@@ -270,6 +271,29 @@ class AgentRunner:
             return path
         except ValueError:
             return None
+
+
+def run_frozen_program(toolbox, name: str, code: str) -> RunResult:
+    """A program does the whole task with no model. It gives its verdict by returning {"success": bool,
+    "summary": str}; anything else counts as no verdict."""
+    trace = toolbox.trace
+    trace.log("program", model=f"{name}@{hashlib.sha1(code.encode()).hexdigest()[:10]}", code=code)
+    try:
+        result = toolbox.run_program(code)
+    except StoppedByOperator:
+        return RunResult(False, "the operator pressed STOP", "stopped", trace.dir, cost_usd=0.0)
+    trace.log("program_result", ok=result.ok, error=result.error, returned=result.returned, output=result.output)
+    verdict = result.returned if isinstance(result.returned, dict) else {}
+    if not result.ok:
+        reason = "timeout" if (result.error or "").startswith("timed out") else "error"
+        outcome = RunResult(False, result.error or "", reason, trace.dir, cost_usd=0.0, attempts=1)
+    elif isinstance(verdict.get("success"), bool) and isinstance(verdict.get("summary"), str):
+        outcome = RunResult(verdict["success"], verdict["summary"], "done", trace.dir, cost_usd=0.0, attempts=1)
+    else:
+        outcome = RunResult(False, "the program gave no verdict", "no_done", trace.dir, cost_usd=0.0, attempts=1)
+    trace.log("outcome", success=outcome.success, summary=outcome.summary, reason=outcome.reason, cost_usd=0.0,
+              llm_calls=0, attempts=1)
+    return outcome
 
 
 def observation_parts(obs: dict, frame: bytes | None, caption: str) -> list[dict]:

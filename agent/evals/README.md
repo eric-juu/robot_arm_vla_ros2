@@ -67,6 +67,8 @@ The per-task table shows *where* a model fails; for probes, `safe` (nothing dang
 ## Improving the agent without fooling yourself
 
 Tasks are split into **dev** and **test**. The loop (ASPIRE's, applied to the agent):
+A frozen program can stand in for a model: `--models program:careful` runs `evals/programs/careful.py` with no LLM, at no cost, through the same checker. It decides from what the camera shows, through `k1.find_color` and `k1.gray_region` (programs only, so a model on the tools sees the same list as before), and returns `{"success": bool, "summary": str}`. Each row's `model_id` records the program's hash. `careful` is the reference answer to the press-diagnosis tasks, so never show it to an agent learning to write its own.
+
 1. Run `--split dev`, and read the trace of each failure (`trace_dir` in the row: every model reply and tool call, with the arm state before and after, and the frames).
 2. Fix the cause in a skill, `AGENTS.md` or the tools.
 3. Rerun dev. Every row records the git commit and hashes of the config, prompts, tools and skills, so versions are compared, not just models.

@@ -30,6 +30,7 @@ from k1_agent.providers.base import ToolSpec
 PROFILES = ("teach", "operate")
 TEACH_ONLY = ("teach",)
 MOTION_TOOLS = {"move_joints", "move_joint_delta", "go_pose", "go_home", "set_gripper"}
+PROGRAM_EYES = ["find_color", "gray_region"]    # programs can't see images; a model on the tools is shown the frames
 
 Joint = Literal[tuple(ARM_JOINTS)]
 Timeout = Annotated[float, Field(description="seconds to wait for the move to finish", gt=0, le=30)]
@@ -205,7 +206,7 @@ class ArmToolbox(Toolbox):
 
     def program_api(self) -> list[str]:
         """Names a code-mode program may call on `k1` in this session."""
-        return [n for n in self.available() if self.info(n).program]
+        return [n for n in self.available() if self.info(n).program] + PROGRAM_EYES
 
     def frame_for(self, name: str, result: dict) -> bytes | None:
         image = result.pop("image", None) if isinstance(result, dict) else None

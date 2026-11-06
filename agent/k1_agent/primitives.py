@@ -16,6 +16,7 @@ arm if the connection drops. On top of that:
 import functools
 import math
 
+from k1_agent import vision
 from k1_agent.client import K1Client, K1Error, StoppedByOperator
 from k1_agent.trace import Trace
 
@@ -44,12 +45,15 @@ def primitive(frame: bool = False, motion: bool = False):
             except K1Error as e:
                 result = fail("connection", str(e))
             image = result.pop("image", None) if isinstance(result, dict) else None
+            pixels = result.pop("pixels", None) if isinstance(result, dict) else None    # the frame is in the trace
             if frame and image is None:
                 image = self._snapshot()
             self.last_frame = image if frame else None
             self._record(fn.__name__, named, result, before, self._arm_positions(), image)
             if image is not None and fn.__name__ == "observe":
                 result["image"] = image
+            if pixels is not None:
+                return {**result, "pixels": pixels}     # a copy: the trace keeps the dict it was given
             return result
         call.is_primitive = True
         return call
@@ -180,6 +184,27 @@ class Primitives:
             "steps_left": self.max_steps - self.steps_used,
             "image": self._snapshot(),
         }
+
+    @primitive(frame=True)
+    def find_color(self, color: str, min_pixels: int = 20) -> dict:
+        """Blobs of a colour in a fresh frame, largest first, each with x, y, left, right, top, bottom, pixels."""
+        if color not in vision.COLORS:
+            return fail("bad_arguments", f"unknown colour {color!r}, use {sorted(vision.COLORS)}")
+        image = self._snapshot()
+        if image is None:
+            return fail("no_frame", "the camera has no frame")
+        return {"ok": True, "blobs": vision.find_color(image, color, min_pixels), "image": image}
+
+    @primitive(frame=True)
+    def gray_region(self, left: int, top: int, right: int, bottom: int) -> dict:
+        """Brightness (0-255) of a box in a fresh frame: width, height and a flat list of pixels, row by row."""
+        image = self._snapshot()
+        if image is None:
+            return fail("no_frame", "the camera has no frame")
+        try:
+            return {"ok": True, **vision.gray_region(image, int(left), int(top), int(right), int(bottom)), "image": image}
+        except ValueError as e:
+            return fail("bad_arguments", str(e))
 
     @primitive(frame=True, motion=True)
     def move_joints(self, positions, timeout: float | None = None) -> dict:

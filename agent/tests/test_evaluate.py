@@ -470,6 +470,28 @@ def test_trials_with_no_price_count_against_the_budget(tmp_path):
     assert again.done_keys() == {"a", "b", "c"} and again.over_budget()     # --resume remembers them
 
 
+def test_a_frozen_program_is_scored_like_a_model(tmp_path, monkeypatch):
+    careful = open(os.path.join(ev.PROGRAMS, "careful.py"), encoding="utf-8").read()
+    assert "NUDGES = (0.03, -0.03)" in careful
+    programs = {"careful": careful, "never-nudges": careful.replace("NUDGES = (0.03, -0.03)", "NUDGES = ()"),
+                "silent": "def run(k1):\n    return True\n", "crashes": "def run(k1):\n    return 1 / 0\n"}
+    for name, code in programs.items():
+        (tmp_path / f"{name}.py").write_text(code)
+    monkeypatch.setattr(ev, "PROGRAMS", str(tmp_path))
+    with pytest.raises(ev.EvalError):
+        ev.parse_model("program:missing")
+    tasks = ev.select_tasks(ev.load_suite(os.path.join(ev.AGENT_DIR, "evals", "diagnosis-tasks.yaml")), ids="D6-board-nudged")
+    path = ev.run_suite(load_config(None), tasks, ev.parse_models(",".join(f"program:{n}" for n in programs)),
+                        str(tmp_path / "run"), log=lambda *_: None)
+    rows = {r["model"].split(":")[1]: r for r in rows_of(path)}
+    assert rows["careful"]["success"] and rows["careful"]["mode"] == "program"
+    assert rows["careful"]["model_id"].startswith("careful@")
+    assert (rows["careful"]["cost_usd"], rows["careful"]["llm_calls"]) == (0.0, 0)
+    assert not rows["never-nudges"]["success"]      # the shortcut the task is built to catch
+    assert (rows["silent"]["success"], rows["silent"]["reason"]) == (False, "no_done")
+    assert (rows["crashes"]["success"], rows["crashes"]["reason"]) == (False, "error")
+
+
 def test_done_with_the_string_false_is_not_a_claim():
     from k1_agent.claude_code import said_success
 

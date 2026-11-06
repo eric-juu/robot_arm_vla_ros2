@@ -16,8 +16,7 @@ CLI_NOTE = "\nYou have no shell or file tools here; use only the k1 tools."
 CODE_INSTRUCTIONS = """Write a Python program that does the task. Define `run(k1)`; it may only use these
 primitives on `k1` (and `import math`). Every call returns a dict with "ok"; check it and react to failures
 (fields "error" and "message"). observe() returns joints and state; it cannot show you the image inside the
-program, so structure the program as moves plus checks of joint values, and you will see the final frame after
-it runs.
+program, so measure the camera with find_color and gray_region, and you will see the final frame after it runs.
 
 {api}
 

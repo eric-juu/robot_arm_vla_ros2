@@ -1,13 +1,15 @@
+import io
 import json
 import os
 
 import pytest
+from PIL import Image
 
 from k1_agent.cli import DEFAULT_CONFIG, main
 from k1_agent.client import K1Client
 from k1_agent.primitives import Primitives
 from k1_agent.skills import SkillLibrary
-from k1_agent.tools import ArmToolbox
+from k1_agent.tools import PROGRAM_EYES, ArmToolbox
 from k1_agent.trace import Trace
 from conftest import motors_on
 
@@ -30,6 +32,33 @@ def test_schemas_come_from_the_signatures():
     assert any(option.get("minItems") == 6 for option in positions["anyOf"])
     assert schemas["done"]["required"] == ["success", "summary"]
     assert len(ArmToolbox.schema_digest()) == 10
+
+
+def test_programs_measure_the_camera_and_models_see_the_same_tools(k1, live_server, monkeypatch):
+    img = Image.new("RGB", (100, 80), (90, 90, 90))
+    img.paste((230, 200, 40), (10, 20, 30, 40))
+    img.paste((230, 200, 40), (60, 50, 70, 60))
+    buffer = io.BytesIO()
+    img.save(buffer, "JPEG", quality=95)
+    monkeypatch.setattr(k1, "snapshot", lambda: buffer.getvalue())
+
+    trace = Trace(live_server["runs"], "eyes")
+    box = ArmToolbox(Primitives(k1, trace), None)
+    assert not set(PROGRAM_EYES) & set(box.available()) and set(PROGRAM_EYES) <= set(box.program_api())
+    code = ("def run(k1):\n"
+            "    blobs = k1.find_color('yellow')['blobs']\n"
+            "    box = k1.gray_region(15, 25, 75, 55)\n"
+            "    return [blobs, box['width'], box['height'], len(box['pixels']), box['pixels'][0],\n"
+            "            k1.find_color('mauve')['error'], k1.gray_region(200, 0, 300, 10)['error']]\n")
+    result = box.run_program(code)
+    assert result.ok, result.error
+    blobs, width, height, count, first, unknown, outside = result.returned
+    assert [(b["left"], b["right"], b["top"], b["bottom"]) for b in blobs] == [(10, 29, 20, 39), (60, 69, 50, 59)]
+    assert blobs[0]["pixels"] == pytest.approx(400, abs=10) and blobs[0]["x"] == pytest.approx(19.5, abs=0.5)
+    assert (width, height, count) == (60, 30, 1800) and first > 150
+    assert (unknown, outside) == ("bad_arguments", "bad_arguments")
+    assert not any("pixels" in e["result"] for e in trace.entries)      # the frame is saved instead
+    assert [e["frame"] for e in trace.entries if e["name"] == "gray_region"][0]
 
 
 def test_bad_calls_get_typed_errors(k1):
