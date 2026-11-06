@@ -31,7 +31,7 @@ pip install -e ".[all,sim]"
 
 Set the API keys of the providers you test (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`; `k1-agent login` for `claude-code:*`, `codex login` for `codex:*`). A model whose key is missing fails its trials and doesn't stop the run. Check `../pricing.yaml` against the providers' pricing pages and add any model that's missing; an unpriced model shows `$?` and the budget cap can't count it.
 
-`--models` takes a comma-separated list: a bare id picks the provider from its name, `provider:model` names it, and `@effort` sets a reasoning effort (for example `openai:<id>@high` or `claude-code:<id>@low`; not supported for Codex or Gemini). The same names work for `k1-agent serve`.
+`--models` takes a comma-separated list: a bare id picks the provider from its name, `provider:model` names it, and `@effort` sets a reasoning effort (for example `openai:<id>@high` or `claude-code:<id>@low`, or `codex:<id>@low` for Codex's `model_reasoning_effort`; not supported for Gemini). The same names work for `k1-agent serve`.
 
 ## Quick start
 

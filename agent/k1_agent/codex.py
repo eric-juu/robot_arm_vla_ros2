@@ -105,6 +105,8 @@ class CodexRunner(ClaudeCodeRunner):
             cmd += ["--disable", feature]
         if self.model:
             cmd += ["-m", self.model]
+        if self.effort:
+            cmd += ["-c", f"model_reasoning_effort={json.dumps(self.effort)}"]
         return cmd + ["--", prompt]
 
     def environment(self) -> dict:

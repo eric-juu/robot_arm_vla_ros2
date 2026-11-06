@@ -218,6 +218,15 @@ def test_claude_code_runner_ends_on_stop(live_server, tmp_path, monkeypatch):
     page.ws.close()
 
 
+def test_claude_code_session_error_is_not_a_result(tmp_path):
+    runner = ClaudeCodeRunner(None, Trace(str(tmp_path), "cc"), "http://x")
+    refused = {"type": "result", "subtype": "success", "is_error": True, "total_cost_usd": 0,
+               "result": "Fable 5.1 requires usage credits."}
+    assert runner.handle_event(refused) is None and "usage credits" in runner.error
+    out_of_turns = {"type": "result", "subtype": "error_max_turns", "is_error": True, "result": "gave up"}
+    assert runner.handle_event(out_of_turns) == "gave up"       # the model ran out of turns: its own failure
+
+
 def test_claude_code_session_without_done_fails(live_server, tmp_path, monkeypatch):
     with K1Client(live_server["url"], live_server["token"]) as k1:
         runner = make_claude_runner(live_server, tmp_path, k1, monkeypatch)
@@ -259,7 +268,7 @@ def make_codex_runner(live_server, tmp_path, k1, monkeypatch):
     pricing = Pricing({"gpt-test": {"input": 10.0, "output": 50.0, "cache_read": 1.0, "cache_write": 0.0}})
     return CodexRunner(k1, Trace(live_server["runs"], "codex"), live_server["url"], None,
                        ["--allow-motion", "--max-steps", "5"], model="gpt-test",
-                       command=[sys.executable, str(script)], pricing=pricing)
+                       command=[sys.executable, str(script)], pricing=pricing, effort="low")
 
 
 def test_codex_runner(live_server, tmp_path, monkeypatch):
@@ -280,6 +289,7 @@ def test_codex_runner(live_server, tmp_path, monkeypatch):
                                                                  if a == "--disable"}
         overrides = dict(argv[i + 1].split("=", 1) for i, a in enumerate(argv) if a == "-c")
         assert overrides["mcp_servers.k1.default_tools_approval_mode"] == '"approve"'
+        assert overrides["model_reasoning_effort"] == '"low"'
         assert json.loads(overrides["mcp_servers.k1.args"])[-4:] == ["--web-operator", "--allow-motion",
                                                                     "--max-steps", "5"]
         assert "done(success, summary)" in argv[-1] and argv[-1].endswith("Task for the K1 arm: turn the base left")

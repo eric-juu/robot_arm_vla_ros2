@@ -128,13 +128,19 @@ def _per_task(group: list[dict], key: str = "suite_task") -> dict:
 
 
 def summarize_trials(rows: list[dict]) -> list[dict]:
+    """Errored trials (the CLI or API never ran the task) are counted apart, not as failures; once --resume
+    reruns an errored trial, its error no longer counts. A group with only errored trials is left out."""
     groups: dict = {}
     for row in rows:
         if row.get("kind") == "trial":
             key = (row["tier"], row["model"], row["mode"], row.get("skills", "on"), row.get("split", "dev"))
             groups.setdefault(key, []).append(row)
     out = []
-    for (tier, model, mode, skills, split), group in sorted(groups.items()):
+    for (tier, model, mode, skills, split), all_rows in sorted(groups.items()):
+        group = [r for r in all_rows if not r.get("error")]
+        if not group:
+            continue
+        errors = len({r.get("key") for r in all_rows if r.get("error")} - {r.get("key") for r in group})
         n, wins = len(group), sum(bool(r["success"]) for r in group)
         costs = [r.get("cost_usd") for r in group]
         known = None not in costs
@@ -154,7 +160,7 @@ def summarize_trials(rows: list[dict]) -> list[dict]:
             "false_successes": sum(1 for r in group if r.get("claimed") and not r["success"]),
             "claim_precision": (sum(1 for r in claims if r["success"]) / len(claims)) if claims else None,
             "success_at_1": (sum(1 for r in code if r["success"] and r["attempts"] == 1) / len(code)) if code else None,
-            "errors": sum(1 for r in group if r.get("error")),
+            "errors": errors,
             "wall_s": sum(r["wall_s"] for r in group) / n,
             "repeated_failures": sum(a.get("repeated_failures", 0) for a in audits) / n,
             "refusals": sum(a.get("refused", 0) for a in audits) / n,

@@ -174,6 +174,10 @@ class ClaudeCodeRunner:
             self.turns = event.get("num_turns") or 0
             self.trace.log("claude_code_result", subtype=event.get("subtype"), is_error=event.get("is_error"),
                            cost_usd=self.cost_usd, turns=self.turns, usage=self.usage.as_dict())
+            if event.get("is_error") and event.get("subtype") != "error_max_turns":
+                # the session didn't run the task (usage limit, a model the plan lacks...): an error, not a result
+                self.error = (event.get("result") or event.get("subtype") or "error")[:500]
+                return None
             return event.get("result") or ""
         return None
 

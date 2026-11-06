@@ -52,7 +52,7 @@ To run the agent on another machine, add `--url https://<link>.trycloudflare.com
 | Claude Code | `claude-code` / `claude-code:<model>` | the signed-in Claude account | install Claude Code, `k1-agent login` (headless: `claude setup-token`, then `CLAUDE_CODE_OAUTH_TOKEN`) |
 | Codex | `codex` / `codex:<model>` | the signed-in ChatGPT account | install Codex and `codex-code-mode-host` next to it, `codex login` (`--device-auth` without a browser) |
 
-`<model>@<effort>` sets a reasoning effort (API models). Model ids and the default for each provider are in `config.yaml`; prices in `pricing.yaml`.
+`<model>@<effort>` sets a reasoning effort (API models, Claude Code and Codex). Model ids and the default for each provider are in `config.yaml`; prices in `pricing.yaml`.
 
 Claude Code and Codex run headless, one session per task, and are locked down the same way:
 - their only tools are the k1 MCP tools (Claude Code: `--tools ""`; Codex has no such switch, so its own tools are turned off one by one and the rest is fenced into a read-only sandbox; recheck `k1_agent/codex.py` after upgrading Codex);

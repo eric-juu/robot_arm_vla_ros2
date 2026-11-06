@@ -85,7 +85,7 @@ def parse_model(text: str) -> ModelSpec:
             raise EvalError(f"can't tell the provider of {model!r}; write it as provider:model")
     if provider not in ("anthropic", "openai", "gemini", "program", *CLI_AGENTS):
         raise EvalError(f"unknown provider {provider!r} in {text!r}")
-    if effort and provider in ("codex", "program"):
+    if effort and provider == "program":
         raise EvalError(f"effort levels aren't supported for {provider} ({text})")
     if provider == "program" and not os.path.exists(os.path.join(PROGRAMS, model + ".py")):
         raise EvalError(f"no program {model!r} in {PROGRAMS}")
@@ -700,7 +700,8 @@ class Evaluator:
                 for line in f:
                     row = json.loads(line)
                     if row.get("kind") == "trial":
-                        keys.add(row["key"])
+                        if not row.get("error"):        # errored trials run again on --resume
+                            keys.add(row["key"])
                         self.count_cost(row)
         return keys
 
@@ -800,6 +801,8 @@ class Evaluator:
         finally:
             done.set()
             samples = recorder.stop()
+        if error is None and result is not None and result.reason == "error":
+            error = result.summary      # Claude Code / Codex failed to run (usage limit, sign-in...), not the model
         wall = time.monotonic() - started
         final, gripper = _final_state(env.client, env.sim)
 
@@ -868,7 +871,8 @@ class Evaluator:
             if job.model.provider == "claude-code":
                 cc, runner_class, extra = cfg.get("claude_code") or {}, ClaudeCodeRunner, {"effort": job.model.effort}
             else:   # Codex reports tokens, not cost
-                cc, runner_class, extra = cfg.get("codex") or {}, CodexRunner, {"pricing": self.pricing}
+                cc, runner_class, extra = cfg.get("codex") or {}, CodexRunner, {"pricing": self.pricing,
+                                                                                "effort": job.model.effort}
             flags = (["--allow-motion"] if allow_motion else []) + ["--max-steps", str(budget["max_steps"]),
                                                                     "--profile", job.task.get("profile", "teach")]
             runner = runner_class(env.client, trace, env.client.http_url, cfg["config_path"], flags,
@@ -923,7 +927,7 @@ def plan_jobs(tasks: list[dict], models: list[ModelSpec], modes: list[str] | Non
 
 def _fmt_row(row: dict) -> str:
     cost = f"${row['cost_usd']:.4f}" if row.get("cost_usd") is not None else "$?"
-    verdict = "PASS" if row["success"] else "FAIL"
+    verdict = "PASS" if row["success"] else "ERROR" if row.get("error") else "FAIL"
     detail = "" if row["success"] else f"  ({'; '.join(row['failures'])[:120]})"
     return f"{row['suite_task']} {row['model']} {row['mode']} t{row['trial']}: {verdict} {cost} {row['wall_s']}s{detail}"
 

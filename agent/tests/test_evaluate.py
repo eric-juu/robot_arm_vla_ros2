@@ -438,7 +438,7 @@ def test_diagnosis_checks():
     assert "ran into something 2 times" in ev.check_trial([{"max_touches": 1}], said)[1][0]
 
 
-def test_effort_reaches_claude_code_and_codex_refuses_it():
+def test_effort_reaches_claude_code_and_codex():
     from k1_agent.claude_code import ClaudeCodeRunner
 
     spec = ev.parse_model("claude-code:claude-sonnet-5-5@low")
@@ -446,8 +446,9 @@ def test_effort_reaches_claude_code_and_codex_refuses_it():
     line = ClaudeCodeRunner(None, None, "http://arm", command=["claude"], effort=spec.effort).command_line("go")
     assert line[line.index("--effort") + 1] == "low"
     assert "--effort" not in ClaudeCodeRunner(None, None, "http://arm", command=["claude"]).command_line("go")
+    assert ev.parse_model("codex:gpt-6-astra@high").effort == "high"     # the flag: test_service.test_codex_runner
     with pytest.raises(ev.EvalError):
-        ev.parse_model("codex:gpt-6-astra@high")
+        ev.parse_model("program:careful@high")
 
 
 def test_diagnosis_tasks_get_the_same_shifts_by_trial():
@@ -468,6 +469,22 @@ def test_trials_with_no_price_count_against_the_budget(tmp_path):
     assert run.estimated() == pytest.approx(2.0) and run.over_budget()      # no priced trial: the dearest rate
     again = ev.Evaluator(config, str(tmp_path / "run"), max_cost_usd=3.0, log=lambda *a: None)
     assert again.done_keys() == {"a", "b", "c"} and again.over_budget()     # --resume remembers them
+
+
+def test_errored_trials_are_not_failures_and_run_again(tmp_path):
+    config = {"skills_dir": str(tmp_path / "none"), "config_path": str(tmp_path / "config.yaml")}
+    run = ev.Evaluator(config, str(tmp_path / "run"), log=lambda *a: None)
+    base = {"kind": "trial", "tier": 1, "model": "m", "mode": "tools", "suite_task": "T1", "wall_s": 10.0,
+            "cost_usd": 0.01, "failures": []}
+    run.write({**base, "key": "a", "success": True})
+    run.write({**base, "key": "b", "success": False, "error": "usage limit", "failures": ["usage limit"]})
+    run.write({**base, "key": "c", "success": False, "error": "usage limit", "failures": ["usage limit"]})
+    run.write({**base, "key": "c", "success": True})                    # --resume ran it again
+    assert ev.Evaluator(config, str(tmp_path / "run"), log=lambda *a: None).done_keys() == {"a", "c"}
+    group = ev.summarize_trials(rows_of(run.results_path))[0]
+    assert group["n"] == 2 and group["success_rate"] == 1.0 and group["errors"] == 1
+    assert "ERROR" in ev._fmt_row({**base, "key": "b", "trial": 1, "success": False, "error": "x", "failures": ["x"]})
+    assert ev.summarize_trials([{**base, "key": "d", "success": False, "error": "x"}]) == []
 
 
 def test_a_frozen_program_is_scored_like_a_model(tmp_path, monkeypatch):

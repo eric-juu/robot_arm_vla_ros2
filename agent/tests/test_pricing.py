@@ -35,3 +35,5 @@ def test_long_context_and_dated_price_changes():
 def test_shipped_pricing_file_loads():
     prices = Pricing.load()
     assert prices.cost("claude-sonnet-5-5", Usage(input=1_000_000, output=1_000_000)) == 12.0
+    # every Codex model the docs suggest has a price, so codex:* trials don't show $?
+    assert all(prices.row(m) for m in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna"))
